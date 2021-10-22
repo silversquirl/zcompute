@@ -175,6 +175,7 @@ pub const Context = struct {
     }
 
     fn findMemoryType(self: Context, size: u64, flags: vk.MemoryPropertyFlags) ?u32 {
+        // TODO: if host_visible, prioritize host_cached
         const mems = self.vki.getPhysicalDeviceMemoryProperties(self.phys_device);
         for (mems.memory_types[0..mems.memory_type_count]) |mem_type, mem_type_idx| {
             if (mem_type.property_flags.contains(flags) and
@@ -194,23 +195,38 @@ pub fn Buffer(comptime T: type) type {
         mem: vk.DeviceMemory,
         off: u64,
         len: u64,
-        owned: bool = false,
+        owned: bool,
 
         const Self = @This();
 
-        pub fn init(ctx: *Context, len: u64) !Self {
-            const mem = try ctx.alloc(len * @sizeOf(T), .{});
-            var self = try initMem(ctx, mem, 0, len);
-            self.owned = true;
+        pub fn init(ctx: *Context, len: u64, flags: BufferInitFlags) !Self {
+            const mem = try ctx.alloc(len * @sizeOf(T), .{
+                .host_coherent_bit = flags.coherent,
+                .host_visible_bit = flags.map,
+            });
+            var self = try initMem(ctx, mem, 0, len, flags, true, true);
             return self;
         }
 
-        pub fn initMem(ctx: *Context, mem: vk.DeviceMemory, off: u64, len: u64) !Self {
+        pub fn initMem(
+            ctx: *Context,
+            mem: vk.DeviceMemory,
+            off: u64,
+            len: u64,
+            flags: BufferInitFlags,
+            own_memory: bool,
+            exclusive: bool,
+        ) !Self {
+            std.debug.assert(!own_memory or exclusive); // If owned, must also be exclusive
+
             const buf = try ctx.vkd.createBuffer(ctx.device, .{
-                .flags = .{}, // TODO
+                .flags = .{},
                 .size = len * @sizeOf(T),
-                .usage = .{}, // TODO
-                .sharing_mode = .exclusive, // TODO
+                .usage = .{
+                    .uniform_buffer_bit = flags.uniform,
+                    .storage_buffer_bit = flags.storage,
+                },
+                .sharing_mode = if (exclusive) .exclusive else .concurrent,
                 .queue_family_index_count = 1,
                 .p_queue_family_indices = &[_]u32{
                     ctx.queue_family,
@@ -223,6 +239,7 @@ pub fn Buffer(comptime T: type) type {
                 .mem = mem,
                 .off = off,
                 .len = len,
+                .owned = own_memory,
             };
         }
 
@@ -232,8 +249,31 @@ pub fn Buffer(comptime T: type) type {
                 self.ctx.free(self.mem);
             }
         }
+
+        const min_map_align = 64; // Spec requires min_memory_map_alignment limit to be at least 64
+        pub fn map(self: Self) ![]align(min_map_align) T {
+            const ptr = try self.ctx.vkd.mapMemory(
+                self.ctx.device,
+                self.mem,
+                self.off,
+                self.len * @sizeOf(T),
+                .{},
+            );
+            const ptr_aligned = @alignCast(min_map_align, ptr);
+            return @ptrCast([*]align(min_map_align) T, ptr_aligned)[0..self.len];
+        }
+        pub fn unmap(self: Self) void {
+            self.ctx.vkd.unmapMemory(self.ctx.device, self.mem);
+        }
     };
 }
+pub const BufferInitFlags = packed struct {
+    coherent: bool = false,
+    map: bool = false,
+
+    uniform: bool = false,
+    storage: bool = false,
+};
 
 const BaseDispatch = vk.BaseWrapper(.{
     .CreateInstance,
@@ -259,6 +299,8 @@ const DeviceDispatch = vk.DeviceWrapper(.{
     .DestroyDevice,
     .FreeMemory,
     .GetDeviceQueue,
+    .MapMemory,
+    .UnmapMemory,
 });
 
 // Simple loader for base Vulkan functions
