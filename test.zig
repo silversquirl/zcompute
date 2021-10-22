@@ -9,6 +9,22 @@ var allocator_instance = std.heap.GeneralPurposeAllocator(.{
 const allocator = &allocator_instance.allocator;
 
 test "initialization" {
-    const ctx = try zc.Context.init(allocator);
+    var ctx = try zc.Context.init(allocator);
     ctx.deinit();
+}
+
+test "alloc/free" {
+    var ctx = try zc.Context.init(allocator);
+    defer ctx.deinit();
+
+    const mem = try ctx.alloc(100, .{});
+    defer ctx.free(mem);
+}
+
+test "buffer creation/deletion" {
+    var ctx = try zc.Context.init(allocator);
+    defer ctx.deinit();
+
+    const buf = try zc.Buffer([2]f32).init(&ctx, 6);
+    defer buf.deinit();
 }

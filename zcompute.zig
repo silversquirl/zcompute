@@ -16,7 +16,11 @@ pub const Context = struct {
     phys_device: vk.PhysicalDevice,
     device: vk.Device,
 
+    queue_family: u32,
     queue: vk.Queue,
+
+    alloc_count: u32 = 0,
+    alloc_max: u32,
 
     /// BEWARE: Using a GPA with nonzero stack_trace_frames may cause random segmentation faults
     pub fn init(allocator: *std.mem.Allocator) !Context {
@@ -105,7 +109,6 @@ pub const Context = struct {
         defer allocator.free(devices);
         _ = try self.vki.enumeratePhysicalDevices(self.instance, &n_devices, devices.ptr);
 
-        var compute_family: u32 = undefined;
         self.phys_device = for (devices[0..n_devices]) |dev| {
             var n_queues: u32 = undefined;
             self.vki.getPhysicalDeviceQueueFamilyProperties(dev, &n_queues, null);
@@ -113,7 +116,7 @@ pub const Context = struct {
             defer allocator.free(queues);
             self.vki.getPhysicalDeviceQueueFamilyProperties(dev, &n_queues, queues.ptr);
 
-            compute_family = for (queues[0..n_queues]) |queue, i| {
+            self.queue_family = for (queues[0..n_queues]) |queue, i| {
                 if (queue.queue_flags.compute_bit) {
                     break @intCast(u32, i);
                 }
@@ -126,11 +129,14 @@ pub const Context = struct {
             return error.NoSuitableDevice;
         };
 
+        const props = self.vki.getPhysicalDeviceProperties(self.phys_device);
+        self.alloc_max = props.limits.max_memory_allocation_count;
+
         // Create logical device
         const queue_infos = [_]vk.DeviceQueueCreateInfo{
             .{
                 .flags = .{},
-                .queue_family_index = compute_family,
+                .queue_family_index = self.queue_family,
                 .queue_count = 1,
                 .p_queue_priorities = &[1]f32{1.0},
             },
@@ -149,9 +155,85 @@ pub const Context = struct {
         self.vkd = try DeviceDispatch.load(self.device, self.vki.dispatch.vkGetDeviceProcAddr);
         errdefer self.vkd.destroyDevice(self.device, &self.vk_alloc);
 
-        self.queue = self.vkd.getDeviceQueue(self.device, compute_family, 0);
+        self.queue = self.vkd.getDeviceQueue(self.device, self.queue_family, 0);
+    }
+
+    pub fn alloc(self: *Context, size: u64, flags: vk.MemoryPropertyFlags) !vk.DeviceMemory {
+        if (self.alloc_count >= self.alloc_max) {
+            return error.OutOfDeviceMemory;
+        }
+        const mem_type_idx = self.findMemoryType(size, flags) orelse {
+            return error.UnsupportedAllocationFlags;
+        };
+        return self.vkd.allocateMemory(self.device, .{
+            .allocation_size = size,
+            .memory_type_index = mem_type_idx,
+        }, &self.vk_alloc);
+    }
+    pub fn free(self: *Context, mem: vk.DeviceMemory) void {
+        self.vkd.freeMemory(self.device, mem, &self.vk_alloc);
+    }
+
+    fn findMemoryType(self: Context, size: u64, flags: vk.MemoryPropertyFlags) ?u32 {
+        const mems = self.vki.getPhysicalDeviceMemoryProperties(self.phys_device);
+        for (mems.memory_types[0..mems.memory_type_count]) |mem_type, mem_type_idx| {
+            if (mem_type.property_flags.contains(flags) and
+                size < mems.memory_heaps[mem_type.heap_index].size)
+            {
+                return @intCast(u32, mem_type_idx);
+            }
+        }
+        return null;
     }
 };
+
+pub fn Buffer(comptime T: type) type {
+    return struct {
+        ctx: *Context,
+        buf: vk.Buffer,
+        mem: vk.DeviceMemory,
+        off: u64,
+        len: u64,
+        owned: bool = false,
+
+        const Self = @This();
+
+        pub fn init(ctx: *Context, len: u64) !Self {
+            const mem = try ctx.alloc(len * @sizeOf(T), .{});
+            var self = try initMem(ctx, mem, 0, len);
+            self.owned = true;
+            return self;
+        }
+
+        pub fn initMem(ctx: *Context, mem: vk.DeviceMemory, off: u64, len: u64) !Self {
+            const buf = try ctx.vkd.createBuffer(ctx.device, .{
+                .flags = .{}, // TODO
+                .size = len * @sizeOf(T),
+                .usage = .{}, // TODO
+                .sharing_mode = .exclusive, // TODO
+                .queue_family_index_count = 1,
+                .p_queue_family_indices = &[_]u32{
+                    ctx.queue_family,
+                },
+            }, &ctx.vk_alloc);
+
+            return Self{
+                .ctx = ctx,
+                .buf = buf,
+                .mem = mem,
+                .off = off,
+                .len = len,
+            };
+        }
+
+        pub fn deinit(self: Self) void {
+            self.ctx.vkd.destroyBuffer(self.ctx.device, self.buf, &self.ctx.vk_alloc);
+            if (self.owned) {
+                self.ctx.free(self.mem);
+            }
+        }
+    };
+}
 
 const BaseDispatch = vk.BaseWrapper(.{
     .CreateInstance,
@@ -165,12 +247,17 @@ const InstanceDispatch = vk.InstanceWrapper(.{
     .EnumerateDeviceExtensionProperties,
     .EnumeratePhysicalDevices,
     .GetDeviceProcAddr,
+    .GetPhysicalDeviceMemoryProperties,
     .GetPhysicalDeviceProperties,
     .GetPhysicalDeviceQueueFamilyProperties,
 });
 
 const DeviceDispatch = vk.DeviceWrapper(.{
+    .AllocateMemory,
+    .CreateBuffer,
+    .DestroyBuffer,
     .DestroyDevice,
+    .FreeMemory,
     .GetDeviceQueue,
 });
 
