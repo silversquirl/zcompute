@@ -6,6 +6,7 @@ const vk_allocator = @import("vk_allocator.zig");
 const log = std.log.scoped(.zcompute);
 
 pub const Context = struct {
+    allocator: *std.mem.Allocator,
     vk_alloc: vk.AllocationCallbacks,
 
     vkb: BaseDispatch,
@@ -22,9 +23,10 @@ pub const Context = struct {
     alloc_count: u32 = 0,
     alloc_max: u32,
 
-    /// BEWARE: Using a GPA with nonzero stack_trace_frames may cause random segmentation faults
+    /// WARNING: Using a GPA with nonzero stack_trace_frames may cause random segmentation faults
     pub fn init(allocator: *std.mem.Allocator) !Context {
         var self: Context = undefined;
+        self.allocator = allocator;
         self.vk_alloc = vk_allocator.wrap(allocator);
 
         try loader.ref();
@@ -188,6 +190,127 @@ pub const Context = struct {
     }
 };
 
+pub fn Shader(comptime bindings: []const ShaderBinding) type {
+    const vk_bindings = blk: {
+        var vk_bindings: [bindings.len]vk.DescriptorSetLayoutBinding = undefined;
+        for (bindings) |bind, i| {
+            vk_bindings[i] = .{
+                .binding = bind[1],
+                .descriptor_type = switch (bind[2]) {
+                    .uniform => .uniform_buffer,
+                    .storage => .storage_buffer,
+                },
+                .descriptor_count = 1,
+                .stage_flags = .{ .compute_bit = true },
+                .p_immutable_samplers = null,
+            };
+        }
+        break :blk vk_bindings;
+    };
+
+    return struct {
+        ctx: *Context,
+        pipeline: vk.Pipeline,
+
+        const Self = @This();
+
+        // Creates a shader from an array of native-endian u32
+        pub fn init(ctx: *Context, code: []const u32) !Self {
+            const module = try ctx.vkd.createShaderModule(ctx.device, .{
+                .flags = .{},
+                .code_size = 4 * code.len,
+                .p_code = code.ptr,
+            }, &ctx.vk_alloc);
+            defer ctx.vkd.destroyShaderModule(ctx.device, module, &ctx.vk_alloc);
+
+            // TODO: cache descriptor sets?
+            const desc_layout = try ctx.vkd.createDescriptorSetLayout(ctx.device, .{
+                .flags = .{},
+                .binding_count = @intCast(u32, vk_bindings.len),
+                .p_bindings = &vk_bindings,
+            }, &ctx.vk_alloc);
+            defer ctx.vkd.destroyDescriptorSetLayout(ctx.device, desc_layout, &ctx.vk_alloc);
+
+            const pipeline_layout = try ctx.vkd.createPipelineLayout(ctx.device, .{
+                .flags = .{},
+                .set_layout_count = 1,
+                .p_set_layouts = &[_]vk.DescriptorSetLayout{desc_layout},
+                .push_constant_range_count = 0,
+                .p_push_constant_ranges = undefined,
+            }, &ctx.vk_alloc);
+            defer ctx.vkd.destroyPipelineLayout(ctx.device, pipeline_layout, &ctx.vk_alloc);
+
+            var pipeline: [1]vk.Pipeline = undefined;
+            _ = try ctx.vkd.createComputePipelines(
+                ctx.device,
+                .null_handle, // TODO: pipeline caching?
+                1,
+                &[_]vk.ComputePipelineCreateInfo{.{
+                    .flags = .{},
+                    .stage = .{
+                        .flags = .{},
+                        .stage = .{ .compute_bit = true },
+                        .module = module,
+                        .p_name = "main",
+                        .p_specialization_info = null,
+                    },
+                    .layout = pipeline_layout,
+                    .base_pipeline_handle = .null_handle,
+                    .base_pipeline_index = 0,
+                }},
+                &ctx.vk_alloc,
+                &pipeline,
+            );
+            errdefer ctx.vkd.destroyPipeline(ctx.device, pipeline, &ctx.vk_alloc);
+
+            return Self{
+                .ctx = ctx,
+                .pipeline = pipeline[0],
+            };
+        }
+
+        // Creates a shader from a array of bytes
+        pub fn initBytes(ctx: *Context, code: []const u8) !Self {
+            if (code.len & 3 != 0 or code.len == 0) {
+                return error.InvalidShader;
+            }
+
+            // Detect endianness
+            const magic = std.mem.readIntSliceLittle(u32, code);
+            const spirv_magic = 0x07230203;
+            const endian: std.builtin.Endian = switch (magic) {
+                spirv_magic => .Little,
+                @byteSwap(u32, spirv_magic) => .Big,
+                else => return error.InvalidShader,
+            };
+
+            // Read SPIR-V
+            const code32 = try ctx.allocator.alloc(u32, @divExact(code.len, 4));
+            defer ctx.allocator.free(code32);
+            for (code32) |*v, i| {
+                v.* = std.mem.readIntSlice(u32, code[i * 4 ..], endian);
+            }
+
+            // Init shader
+            return init(ctx, code32);
+        }
+
+        pub fn deinit(self: Self) void {
+            self.ctx.vkd.destroyPipeline(self.ctx.device, self.pipeline, &self.ctx.vk_alloc);
+        }
+    };
+}
+pub const ShaderBinding = std.meta.Tuple(&.{
+    []const u8, // Field name
+    u32, // Binding index
+    ShaderBindingType, // Binding type
+    type, // Data type
+});
+pub const ShaderBindingType = enum {
+    uniform,
+    storage,
+};
+
 pub fn Buffer(comptime T: type) type {
     return struct {
         ctx: *Context,
@@ -295,8 +418,16 @@ const InstanceDispatch = vk.InstanceWrapper(.{
 const DeviceDispatch = vk.DeviceWrapper(.{
     .AllocateMemory,
     .CreateBuffer,
+    .CreateComputePipelines,
+    .CreateDescriptorSetLayout,
+    .CreatePipelineLayout,
+    .CreateShaderModule,
     .DestroyBuffer,
+    .DestroyDescriptorSetLayout,
     .DestroyDevice,
+    .DestroyPipeline,
+    .DestroyPipelineLayout,
+    .DestroyShaderModule,
     .FreeMemory,
     .GetDeviceQueue,
     .MapMemory,

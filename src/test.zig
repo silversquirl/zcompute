@@ -62,3 +62,22 @@ test "buffer mapping" {
         }, map);
     }
 }
+
+test "compute shader" {
+    var ctx = try zc.Context.init(allocator);
+    defer ctx.deinit();
+
+    const in = try zc.Buffer([2]f32).init(&ctx, 6, .{ .map = true });
+    defer in.deinit();
+
+    const out = try zc.Buffer([2]f32).init(&ctx, 6, .{ .map = true });
+    defer out.deinit();
+
+    const Shader = zc.Shader(&[_]zc.ShaderBinding{
+        .{ "count", 0, .uniform, u32 },
+        .{ "in", 1, .storage, []const f32 },
+        .{ "out", 2, .storage, []f32 },
+    });
+    const shad = try Shader.initBytes(&ctx, @embedFile("test/copy.spv"));
+    defer shad.deinit();
+}
