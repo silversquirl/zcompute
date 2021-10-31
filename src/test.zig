@@ -82,12 +82,12 @@ test "compute shader" {
     var shad = try Shader.initBytes(&ctx, @embedFile("test/copy.spv"));
     defer shad.deinit();
 
-    try shad.exec(0, .{ .direct = .{ count, 1, 1 } }, .{
+    try shad.exec(0, .{ .x = count }, .{
         .count = count_buf,
         .in = in,
         .out = out,
     });
-    _ = try shad.wait(null);
+    try shad.wait();
 
     {
         const data = try out.map();

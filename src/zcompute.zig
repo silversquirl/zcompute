@@ -7,6 +7,10 @@ const vk_allocator = @import("vk_allocator.zig");
 const log = std.log.scoped(.zcompute);
 
 pub const Context = struct {
+    // Public fields:
+    compute_dispatch_limits: [3]u32, // Maximum size of each compute dispatch dimension
+
+    // Internal fields:
     allocator: *std.mem.Allocator,
     vk_alloc: vk.AllocationCallbacks,
 
@@ -134,6 +138,7 @@ pub const Context = struct {
 
         const props = self.vki.getPhysicalDeviceProperties(self.phys_device);
         self.alloc_max = props.limits.max_memory_allocation_count;
+        self.compute_dispatch_limits = props.limits.max_compute_work_group_count;
 
         // Create logical device
         const queue_infos = [_]vk.DeviceQueueCreateInfo{
@@ -413,17 +418,14 @@ pub fn Shader(comptime binding_points: []const ShaderBinding) type {
             self.ctx.vkd.destroyDescriptorSetLayout(self.ctx.device, self.desc_layout, &self.ctx.vk_alloc);
         }
 
-        /// Waits for the current execution to complete, returning true on completion.
-        /// If the optional timeout is reached, returns false.
-        pub fn wait(self: Self, timeout: ?u64) !bool {
-            if (timeout) |t| {
-                return self.waitInternal(t);
-            } else {
-                while (!try self.waitInternal(~@as(u64, 0))) {}
-                return true;
-            }
+        /// Waits indefinitely for the current execution to complete
+        pub fn wait(self: Self) !void {
+            while (!try self.waitTimeout(~@as(u64, 0))) {}
         }
-        fn waitInternal(self: Self, timeout: u64) !bool {
+
+        /// Waits for the current execution to complete, returning true on completion.
+        /// If the timeout is reached, returns false.
+        pub fn waitTimeout(self: Self, timeout: u64) !bool {
             const res = try self.ctx.vkd.waitForFences(
                 self.ctx.device,
                 1,
@@ -469,16 +471,25 @@ pub fn Shader(comptime binding_points: []const ShaderBinding) type {
                 0, undefined // dynamic offsets
             );
 
-            switch (dispatch) {
-                .direct => |dim| self.ctx.vkd.cmdDispatch(cmd_buf, dim[0], dim[1], dim[2]),
-                .indirect => |buf| self.ctx.vkd.cmdDispatchIndirect(cmd_buf, buf.buf, 0),
-            }
+            self.ctx.vkd.cmdDispatchBase(
+                cmd_buf,
+                dispatch.baseX,
+                dispatch.baseY,
+                dispatch.baseZ,
+                dispatch.x,
+                dispatch.y,
+                dispatch.z,
+            );
 
             try self.ctx.vkd.endCommandBuffer(cmd_buf);
 
             // Submit execution
-            if (!try self.wait(wait_timeout)) {
-                return error.Timeout;
+            if (wait_timeout) |timeout| {
+                if (!try self.waitTimeout(timeout)) {
+                    return error.Timeout;
+                }
+            } else {
+                try self.wait();
             }
             try self.ctx.vkd.resetFences(self.ctx.device, 1, &[1]vk.Fence{self.fence});
             try self.ctx.vkd.queueSubmit(self.ctx.queue, 1, &[1]vk.SubmitInfo{.{
@@ -534,9 +545,13 @@ pub const ShaderBindingType = enum {
         };
     }
 };
-pub const ComputeDispatch = union(enum) {
-    direct: [3]u32, // Workgroup dimensions stored in an array
-    indirect: Buffer(u32), // Workgroup dimensions stored in a buffer. TODO: make offset configurable
+pub const ComputeDispatch = struct {
+    x: u32 = 1,
+    y: u32 = 1,
+    z: u32 = 1,
+    baseX: u32 = 0,
+    baseY: u32 = 0,
+    baseZ: u32 = 0,
 };
 
 pub fn Buffer(comptime T: type) type {
@@ -644,8 +659,7 @@ const DeviceDispatch = vk.DeviceWrapper(.{
     .BindBufferMemory,
     .CmdBindDescriptorSets,
     .CmdBindPipeline,
-    .CmdDispatch,
-    .CmdDispatchIndirect,
+    .CmdDispatchBase,
     .CreateBuffer,
     .CreateCommandPool,
     .CreateComputePipelines,
