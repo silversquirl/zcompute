@@ -1,6 +1,7 @@
 //! Simple and easy to use GPU compute library for Zig
 
 const std = @import("std");
+const builtin = @import("builtin");
 const vk = @import("vk.zig");
 const vk_allocator = @import("vk_allocator.zig");
 const log = std.log.scoped(.zcompute);
@@ -72,7 +73,7 @@ pub const Context = struct {
     }
 
     fn instanceLayers(self: Context, allocator: *std.mem.Allocator) ![][*:0]const u8 {
-        if (std.builtin.mode != .Debug) {
+        if (builtin.mode != .Debug) {
             return &.{};
         }
 
@@ -160,11 +161,11 @@ pub const Context = struct {
         self.queue = self.vkd.getDeviceQueue(self.device, self.queue_family, 0);
     }
 
-    pub fn alloc(self: *Context, size: u64, flags: vk.MemoryPropertyFlags) !vk.DeviceMemory {
+    fn alloc(self: *Context, size: u64, mem_type_bits: u32, flags: vk.MemoryPropertyFlags) !vk.DeviceMemory {
         if (self.alloc_count >= self.alloc_max) {
             return error.OutOfDeviceMemory;
         }
-        const mem_type_idx = self.findMemoryType(size, flags) orelse {
+        const mem_type_idx = self.findMemoryType(size, mem_type_bits, flags) orelse {
             return error.UnsupportedAllocationFlags;
         };
         return self.vkd.allocateMemory(self.device, .{
@@ -172,16 +173,20 @@ pub const Context = struct {
             .memory_type_index = mem_type_idx,
         }, &self.vk_alloc);
     }
-    pub fn free(self: *Context, mem: vk.DeviceMemory) void {
+    fn free(self: *Context, mem: vk.DeviceMemory) void {
+        self.alloc_count -= 1;
         self.vkd.freeMemory(self.device, mem, &self.vk_alloc);
     }
 
-    fn findMemoryType(self: Context, size: u64, flags: vk.MemoryPropertyFlags) ?u32 {
+    fn findMemoryType(self: Context, size: u64, mem_type_bits: u32, flags: vk.MemoryPropertyFlags) ?u32 {
         // TODO: if host_visible, prioritize host_cached
         const mems = self.vki.getPhysicalDeviceMemoryProperties(self.phys_device);
-        for (mems.memory_types[0..mems.memory_type_count]) |mem_type, mem_type_idx| {
+        const mem_types = std.bit_set.IntegerBitSet(32){ .mask = mem_type_bits };
+        var it = mem_types.iterator(.{});
+        while (it.next()) |mem_type_idx| {
+            const mem_type = mems.memory_types[0..mems.memory_type_count][mem_type_idx];
             if (mem_type.property_flags.contains(flags) and
-                size < mems.memory_heaps[mem_type.heap_index].size)
+                size <= mems.memory_heaps[mem_type.heap_index].size)
             {
                 return @intCast(u32, mem_type_idx);
             }
@@ -190,27 +195,68 @@ pub const Context = struct {
     }
 };
 
-pub fn Shader(comptime bindings: []const ShaderBinding) type {
-    const vk_bindings = blk: {
-        var vk_bindings: [bindings.len]vk.DescriptorSetLayoutBinding = undefined;
-        for (bindings) |bind, i| {
-            vk_bindings[i] = .{
-                .binding = bind[1],
-                .descriptor_type = switch (bind[2]) {
-                    .uniform => .uniform_buffer,
-                    .storage => .storage_buffer,
-                },
-                .descriptor_count = 1,
-                .stage_flags = .{ .compute_bit = true },
-                .p_immutable_samplers = null,
-            };
+pub fn Shader(comptime binding_points: []const ShaderBinding) type {
+    comptime var layout_bindings: [binding_points.len]vk.DescriptorSetLayoutBinding = undefined;
+    comptime var desc_template_entries: [binding_points.len]vk.DescriptorUpdateTemplateEntry = undefined;
+    comptime var type_counts = std.EnumArray(ShaderBindingType, u32).initDefault(0, .{});
+    for (binding_points) |bind, i| {
+        if (!isBufferWrapper(bind[3])) {
+            @compileError("Shader bindings must use buffer types");
         }
-        break :blk vk_bindings;
+
+        layout_bindings[i] = .{
+            .binding = bind[1],
+            .descriptor_type = bind[2].toVk(),
+            .descriptor_count = 1,
+            .stage_flags = .{ .compute_bit = true },
+            .p_immutable_samplers = null,
+        };
+
+        // TODO: merge consecutive bindings
+        desc_template_entries[i] = .{
+            .dst_binding = bind[1],
+            .dst_array_element = 0,
+            .descriptor_count = 1,
+            .descriptor_type = bind[2].toVk(),
+            .offset = i * @sizeOf(vk.DescriptorBufferInfo),
+            .stride = 0, // TODO
+        };
+
+        type_counts.getPtr(bind[2]).* += 1;
+    }
+
+    const pool_sizes = blk: {
+        var pool_sizes: [type_counts.values.len]vk.DescriptorPoolSize = undefined;
+        var i = 0;
+        var it = type_counts.iterator();
+        while (it.next()) |entry| {
+            if (entry.value.* > 0) {
+                pool_sizes[i] = .{
+                    .type = entry.key.toVk(),
+                    // Multiply by 2 because we need two descriptor sets
+                    .descriptor_count = 2 * entry.value.*,
+                };
+                i += 1;
+            }
+        }
+
+        break :blk pool_sizes[0..i].*;
     };
 
     return struct {
         ctx: *Context,
+
+        desc_layout: vk.DescriptorSetLayout,
+        pipeline_layout: vk.PipelineLayout,
         pipeline: vk.Pipeline,
+        cmd_pool: vk.CommandPool,
+        desc_pool: vk.DescriptorPool,
+        desc_template: vk.DescriptorUpdateTemplate,
+
+        fence: vk.Fence,
+        idx: u1 = 0,
+        cmd_bufs: [2]vk.CommandBuffer,
+        desc_sets: [2]vk.DescriptorSet,
 
         const Self = @This();
 
@@ -226,10 +272,10 @@ pub fn Shader(comptime bindings: []const ShaderBinding) type {
             // TODO: cache descriptor sets?
             const desc_layout = try ctx.vkd.createDescriptorSetLayout(ctx.device, .{
                 .flags = .{},
-                .binding_count = @intCast(u32, vk_bindings.len),
-                .p_bindings = &vk_bindings,
+                .binding_count = @intCast(u32, layout_bindings.len),
+                .p_bindings = &layout_bindings,
             }, &ctx.vk_alloc);
-            defer ctx.vkd.destroyDescriptorSetLayout(ctx.device, desc_layout, &ctx.vk_alloc);
+            errdefer ctx.vkd.destroyDescriptorSetLayout(ctx.device, desc_layout, &ctx.vk_alloc);
 
             const pipeline_layout = try ctx.vkd.createPipelineLayout(ctx.device, .{
                 .flags = .{},
@@ -238,7 +284,7 @@ pub fn Shader(comptime bindings: []const ShaderBinding) type {
                 .push_constant_range_count = 0,
                 .p_push_constant_ranges = undefined,
             }, &ctx.vk_alloc);
-            defer ctx.vkd.destroyPipelineLayout(ctx.device, pipeline_layout, &ctx.vk_alloc);
+            errdefer ctx.vkd.destroyPipelineLayout(ctx.device, pipeline_layout, &ctx.vk_alloc);
 
             var pipeline: [1]vk.Pipeline = undefined;
             _ = try ctx.vkd.createComputePipelines(
@@ -261,11 +307,73 @@ pub fn Shader(comptime bindings: []const ShaderBinding) type {
                 &ctx.vk_alloc,
                 &pipeline,
             );
-            errdefer ctx.vkd.destroyPipeline(ctx.device, pipeline, &ctx.vk_alloc);
+            errdefer ctx.vkd.destroyPipeline(ctx.device, pipeline[0], &ctx.vk_alloc);
+
+            const cmd_pool = try ctx.vkd.createCommandPool(ctx.device, .{
+                .flags = .{
+                    .transient_bit = true,
+                    .reset_command_buffer_bit = true,
+                },
+                .queue_family_index = ctx.queue_family,
+            }, &ctx.vk_alloc);
+            errdefer ctx.vkd.destroyCommandPool(ctx.device, cmd_pool, &ctx.vk_alloc);
+
+            const desc_pool = try ctx.vkd.createDescriptorPool(ctx.device, .{
+                .flags = .{},
+                .max_sets = 2,
+                .pool_size_count = pool_sizes.len,
+                .p_pool_sizes = &pool_sizes,
+            }, &ctx.vk_alloc);
+            errdefer ctx.vkd.destroyDescriptorPool(ctx.device, desc_pool, &ctx.vk_alloc);
+
+            const desc_template = try ctx.vkd.createDescriptorUpdateTemplate(ctx.device, .{
+                .flags = .{},
+                .descriptor_update_entry_count = desc_template_entries.len,
+                .p_descriptor_update_entries = &desc_template_entries,
+                .template_type = .descriptor_set,
+                .descriptor_set_layout = desc_layout,
+                // These fields are ignored in Vulkan 1.1, but we have them so we might as well provide them
+                .pipeline_bind_point = .compute,
+                .pipeline_layout = pipeline_layout,
+                .set = undefined, // idk what this one is
+            }, &ctx.vk_alloc);
+            errdefer ctx.vkd.destroyDescriptorUpdateTemplate(ctx.device, desc_template, &ctx.vk_alloc);
+
+            const fence = try ctx.vkd.createFence(ctx.device, .{
+                .flags = .{ .signaled_bit = true },
+            }, &ctx.vk_alloc);
+            errdefer ctx.vkd.destroyFence(ctx.device, fence, &ctx.vk_alloc);
+
+            var cmd_bufs: [2]vk.CommandBuffer = undefined;
+            try ctx.vkd.allocateCommandBuffers(ctx.device, .{
+                .command_pool = cmd_pool,
+                .level = .primary,
+                .command_buffer_count = 2,
+            }, &cmd_bufs);
+
+            var desc_sets: [2]vk.DescriptorSet = undefined;
+            try ctx.vkd.allocateDescriptorSets(ctx.device, .{
+                .descriptor_pool = desc_pool,
+                .descriptor_set_count = 2,
+                .p_set_layouts = &[2]vk.DescriptorSetLayout{
+                    desc_layout,
+                    desc_layout,
+                },
+            }, &desc_sets);
 
             return Self{
                 .ctx = ctx,
+
+                .desc_layout = desc_layout,
+                .pipeline_layout = pipeline_layout,
                 .pipeline = pipeline[0],
+                .cmd_pool = cmd_pool,
+                .desc_pool = desc_pool,
+                .desc_template = desc_template,
+
+                .fence = fence,
+                .cmd_bufs = cmd_bufs,
+                .desc_sets = desc_sets,
             };
         }
 
@@ -296,8 +404,116 @@ pub fn Shader(comptime bindings: []const ShaderBinding) type {
         }
 
         pub fn deinit(self: Self) void {
+            self.ctx.vkd.destroyFence(self.ctx.device, self.fence, &self.ctx.vk_alloc);
+            self.ctx.vkd.destroyDescriptorUpdateTemplate(self.ctx.device, self.desc_template, &self.ctx.vk_alloc);
+            self.ctx.vkd.destroyDescriptorPool(self.ctx.device, self.desc_pool, &self.ctx.vk_alloc);
+            self.ctx.vkd.destroyCommandPool(self.ctx.device, self.cmd_pool, &self.ctx.vk_alloc);
             self.ctx.vkd.destroyPipeline(self.ctx.device, self.pipeline, &self.ctx.vk_alloc);
+            self.ctx.vkd.destroyPipelineLayout(self.ctx.device, self.pipeline_layout, &self.ctx.vk_alloc);
+            self.ctx.vkd.destroyDescriptorSetLayout(self.ctx.device, self.desc_layout, &self.ctx.vk_alloc);
         }
+
+        /// Waits for the current execution to complete, returning true on completion.
+        /// If the optional timeout is reached, returns false.
+        pub fn wait(self: Self, timeout: ?u64) !bool {
+            if (timeout) |t| {
+                return self.waitInternal(t);
+            } else {
+                while (!try self.waitInternal(~@as(u64, 0))) {}
+                return true;
+            }
+        }
+        fn waitInternal(self: Self, timeout: u64) !bool {
+            const res = try self.ctx.vkd.waitForFences(
+                self.ctx.device,
+                1,
+                &[1]vk.Fence{self.fence},
+                vk.TRUE,
+                timeout,
+            );
+            return res == .success;
+        }
+
+        /// Builds a new execution of the shader, waits for any previous execution to complete, then submits the execution.
+        /// If you know any previous execution has completed prior to this exec call, pass 0 as the wait_timeout.
+        pub fn exec(self: *Self, wait_timeout: ?u64, dispatch: ComputeDispatch, bindings: Bindings) !void {
+            // Update descriptor set
+            const desc_set = self.desc_sets[self.idx];
+
+            var descriptors: [binding_points.len]vk.DescriptorBufferInfo = undefined;
+            inline for (std.meta.fields(Bindings)) |field, i| {
+                descriptors[i] = .{
+                    .buffer = @field(bindings, field.name).buf,
+                    .offset = 0,
+                    .range = vk.WHOLE_SIZE,
+                };
+            }
+            self.ctx.vkd.updateDescriptorSetWithTemplate(
+                self.ctx.device,
+                desc_set,
+                self.desc_template,
+                @ptrCast(*const c_void, &descriptors),
+            );
+
+            // Record command buffer
+            const cmd_buf = self.cmd_bufs[self.idx];
+            try self.ctx.vkd.beginCommandBuffer(cmd_buf, .{
+                .flags = .{ .one_time_submit_bit = true },
+                .p_inheritance_info = null,
+            });
+
+            self.ctx.vkd.cmdBindPipeline(cmd_buf, .compute, self.pipeline);
+            self.ctx.vkd.cmdBindDescriptorSets(cmd_buf, // Why does this function not take a struct??
+                .compute, self.pipeline_layout, // pipeline info
+                0, 1, &[1]vk.DescriptorSet{desc_set}, // descriptor sets
+                0, undefined // dynamic offsets
+            );
+
+            switch (dispatch) {
+                .direct => |dim| self.ctx.vkd.cmdDispatch(cmd_buf, dim[0], dim[1], dim[2]),
+                .indirect => |buf| self.ctx.vkd.cmdDispatchIndirect(cmd_buf, buf.buf, 0),
+            }
+
+            try self.ctx.vkd.endCommandBuffer(cmd_buf);
+
+            // Submit execution
+            if (!try self.wait(wait_timeout)) {
+                return error.Timeout;
+            }
+            try self.ctx.vkd.resetFences(self.ctx.device, 1, &[1]vk.Fence{self.fence});
+            try self.ctx.vkd.queueSubmit(self.ctx.queue, 1, &[1]vk.SubmitInfo{.{
+                .command_buffer_count = 1,
+                .p_command_buffers = &[1]vk.CommandBuffer{cmd_buf},
+
+                .wait_semaphore_count = 0,
+                .p_wait_semaphores = undefined,
+                .p_wait_dst_stage_mask = undefined,
+                .signal_semaphore_count = 0,
+                .p_signal_semaphores = undefined,
+            }}, self.fence);
+
+            // Swap buffers
+            self.idx ^= 1;
+        }
+
+        pub const Bindings = blk: {
+            var fields: [binding_points.len]std.builtin.TypeInfo.StructField = undefined;
+            for (binding_points) |bind, i| {
+                fields[i] = .{
+                    .name = bind[0],
+                    .field_type = bind[3],
+                    .default_value = null,
+                    .is_comptime = false,
+                    .alignment = @alignOf(bind[3]),
+                };
+            }
+            break :blk @Type(.{ .Struct = .{
+                .layout = .Auto,
+                .fields = &fields,
+                .decls = &.{},
+                .is_tuple = false,
+            } });
+        };
     };
 }
 pub const ShaderBinding = std.meta.Tuple(&.{
@@ -305,10 +521,22 @@ pub const ShaderBinding = std.meta.Tuple(&.{
     u32, // Binding index
     ShaderBindingType, // Binding type
     type, // Data type
+
 });
 pub const ShaderBindingType = enum {
     uniform,
     storage,
+
+    fn toVk(t: ShaderBindingType) vk.DescriptorType {
+        return switch (t) {
+            .uniform => .uniform_buffer,
+            .storage => .storage_buffer,
+        };
+    }
+};
+pub const ComputeDispatch = union(enum) {
+    direct: [3]u32, // Workgroup dimensions stored in an array
+    indirect: Buffer(u32), // Workgroup dimensions stored in a buffer. TODO: make offset configurable
 };
 
 pub fn Buffer(comptime T: type) type {
@@ -318,30 +546,11 @@ pub fn Buffer(comptime T: type) type {
         mem: vk.DeviceMemory,
         off: u64,
         len: u64,
-        owned: bool,
 
         const Self = @This();
+        pub const is_zcompute_buffer_wrapper = void;
 
         pub fn init(ctx: *Context, len: u64, flags: BufferInitFlags) !Self {
-            const mem = try ctx.alloc(len * @sizeOf(T), .{
-                .host_coherent_bit = flags.coherent,
-                .host_visible_bit = flags.map,
-            });
-            var self = try initMem(ctx, mem, 0, len, flags, true, true);
-            return self;
-        }
-
-        pub fn initMem(
-            ctx: *Context,
-            mem: vk.DeviceMemory,
-            off: u64,
-            len: u64,
-            flags: BufferInitFlags,
-            own_memory: bool,
-            exclusive: bool,
-        ) !Self {
-            std.debug.assert(!own_memory or exclusive); // If owned, must also be exclusive
-
             const buf = try ctx.vkd.createBuffer(ctx.device, .{
                 .flags = .{},
                 .size = len * @sizeOf(T),
@@ -349,28 +558,34 @@ pub fn Buffer(comptime T: type) type {
                     .uniform_buffer_bit = flags.uniform,
                     .storage_buffer_bit = flags.storage,
                 },
-                .sharing_mode = if (exclusive) .exclusive else .concurrent,
+                .sharing_mode = .exclusive,
                 .queue_family_index_count = 1,
                 .p_queue_family_indices = &[_]u32{
                     ctx.queue_family,
                 },
             }, &ctx.vk_alloc);
+            errdefer ctx.vkd.destroyBuffer(ctx.device, buf, &ctx.vk_alloc);
+
+            const reqs = ctx.vkd.getBufferMemoryRequirements(ctx.device, buf);
+            const mem = try ctx.alloc(reqs.size, reqs.memory_type_bits, .{
+                .host_coherent_bit = flags.coherent,
+                .host_visible_bit = flags.map,
+            });
+            errdefer ctx.free(mem);
+            try ctx.vkd.bindBufferMemory(ctx.device, buf, mem, 0);
 
             return Self{
                 .ctx = ctx,
                 .buf = buf,
                 .mem = mem,
-                .off = off,
+                .off = 0,
                 .len = len,
-                .owned = own_memory,
             };
         }
 
         pub fn deinit(self: Self) void {
+            self.ctx.free(self.mem);
             self.ctx.vkd.destroyBuffer(self.ctx.device, self.buf, &self.ctx.vk_alloc);
-            if (self.owned) {
-                self.ctx.free(self.mem);
-            }
         }
 
         const min_map_align = 64; // Spec requires min_memory_map_alignment limit to be at least 64
@@ -397,6 +612,12 @@ pub const BufferInitFlags = packed struct {
     uniform: bool = false,
     storage: bool = false,
 };
+fn isBufferWrapper(comptime T: type) bool {
+    return @typeInfo(T) == .Struct and
+        @hasField(T, "buf") and
+        std.meta.fieldInfo(T, .buf).field_type == vk.Buffer and
+        @hasDecl(T, "is_zcompute_buffer_wrapper");
+}
 
 const BaseDispatch = vk.BaseWrapper(.{
     .CreateInstance,
@@ -416,22 +637,44 @@ const InstanceDispatch = vk.InstanceWrapper(.{
 });
 
 const DeviceDispatch = vk.DeviceWrapper(.{
+    .AllocateCommandBuffers,
+    .AllocateDescriptorSets,
     .AllocateMemory,
+    .BeginCommandBuffer,
+    .BindBufferMemory,
+    .CmdBindDescriptorSets,
+    .CmdBindPipeline,
+    .CmdDispatch,
+    .CmdDispatchIndirect,
     .CreateBuffer,
+    .CreateCommandPool,
     .CreateComputePipelines,
+    .CreateDescriptorPool,
     .CreateDescriptorSetLayout,
+    .CreateDescriptorUpdateTemplate,
+    .CreateFence,
     .CreatePipelineLayout,
     .CreateShaderModule,
     .DestroyBuffer,
+    .DestroyCommandPool,
+    .DestroyDescriptorPool,
     .DestroyDescriptorSetLayout,
+    .DestroyDescriptorUpdateTemplate,
     .DestroyDevice,
+    .DestroyFence,
     .DestroyPipeline,
     .DestroyPipelineLayout,
     .DestroyShaderModule,
+    .EndCommandBuffer,
     .FreeMemory,
+    .GetBufferMemoryRequirements,
     .GetDeviceQueue,
     .MapMemory,
+    .QueueSubmit,
+    .ResetFences,
     .UnmapMemory,
+    .UpdateDescriptorSetWithTemplate,
+    .WaitForFences,
 });
 
 // Simple loader for base Vulkan functions
@@ -447,12 +690,12 @@ const Loader = struct {
             return;
         }
 
-        const lib_name = switch (std.builtin.os.tag) {
+        const lib_name = switch (builtin.os.tag) {
             .windows => "vulkan-1.dll",
             else => "libvulkan.so.1",
-            .macos => @compileError("Unsupported platform: " ++ @tagName(std.builtin.os)),
+            .macos => @compileError("Unsupported platform: " ++ @tagName(builtin.os)),
         };
-        if (!std.builtin.link_libc) {
+        if (!builtin.link_libc) {
             @compileError("zcompute requires libc to be linked");
         }
 
