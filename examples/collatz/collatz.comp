@@ -1,0 +1,25 @@
+// Compute shader to compute stopping times for the collatz conjecture.
+// Output is a histogram.
+#version 450 core
+
+layout(binding = 0) uniform Uniforms {
+	uint histogram_len;
+};
+layout(binding = 1) buffer Output {
+	uint histogram[];
+};
+
+void main() {
+	uint n = gl_GlobalInvocationID.x + 1;
+	uint i = 0;
+	while (n != 1) {
+		if ((n & 1) == 0) {
+			n = n >> 1;
+		} else {
+			n = 3*n + 1;
+		}
+		i++;
+		if (i == histogram_len - 1) break; // Record all trailing values into the last cell
+	}
+	atomicAdd(histogram[i], 1);
+}
