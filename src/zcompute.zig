@@ -81,7 +81,10 @@ pub const Context = struct {
             return &.{};
         }
 
-        var wanted_layers = [_][:0]const u8{
+        const wanted_layers = comptime std.meta.globalOption(
+            "zcompute_debug_layers",
+            []const [:0]const u8,
+        ) orelse &[_][:0]const u8{
             "VK_LAYER_KHRONOS_validation",
         };
 
@@ -101,7 +104,7 @@ pub const Context = struct {
                     break;
                 }
             } else {
-                log.warn("Skipping validation layer {s}", .{wanted});
+                log.warn("Skipping missing validation layer {s}", .{wanted});
             }
         }
 
