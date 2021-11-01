@@ -20,8 +20,8 @@ pub fn main() !void {
     // Create a compute shader with the right interface
     var shad = try zc.Shader(extern struct {
         histogram_len: u32, // This is a push constant
-    }, &[_]zc.ShaderBinding{
-        .{ "histogram", 1, .storage, zc.Buffer(u32) }, // This is a storage buffer
+    }, &.{
+        zc.storageBuffer("histogram", 1, zc.Buffer(u32)), // This is a storage buffer
     }).initBytes(&ctx, @embedFile("collatz.spv"));
     defer shad.deinit();
 

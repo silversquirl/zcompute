@@ -74,10 +74,10 @@ test "compute shader" {
         data[0] = count;
     }
 
-    const Shader = zc.Shader(void, &[_]zc.ShaderBinding{
-        .{ "count", 0, .uniform, zc.Buffer(u32) },
-        .{ "in", 1, .storage, zc.Buffer(f32) },
-        .{ "out", 2, .storage, zc.Buffer(f32) },
+    const Shader = zc.Shader(void, &.{
+        zc.uniformBuffer("count", 0, zc.Buffer(u32)),
+        zc.storageBuffer("in", 1, zc.Buffer(f32)),
+        zc.storageBuffer("out", 2, zc.Buffer(f32)),
     });
     var shad = try Shader.initBytes(&ctx, @embedFile("test/copy.spv"));
     defer shad.deinit();
@@ -107,8 +107,8 @@ test "push constants" {
     const out = try zc.Buffer([4]f32).init(&ctx, count, .{ .map = true, .storage = true });
     defer out.deinit();
 
-    const Shader = zc.Shader([4]f32, &[_]zc.ShaderBinding{
-        .{ "out", 0, .storage, zc.Buffer([4]f32) },
+    const Shader = zc.Shader([4]f32, &.{
+        zc.storageBuffer("out", 0, zc.Buffer([4]f32)),
     });
     var shad = try Shader.initBytes(&ctx, @embedFile("test/push-constants.spv"));
     defer shad.deinit();

@@ -203,7 +203,7 @@ pub const Context = struct {
     }
 };
 
-pub fn Shader(comptime PushConstants: type, comptime binding_points: []const ShaderBinding) type {
+pub fn Shader(comptime PushConstants: type, comptime parameter_decls: []const ShaderParameter) type {
     switch (@typeInfo(PushConstants)) {
         .Struct => |info| if (info.layout == .Auto) {
             @compileError("Push constant data should have defined layout. Use an extern struct (or a packed struct if you know what you're doing)");
@@ -215,17 +215,17 @@ pub fn Shader(comptime PushConstants: type, comptime binding_points: []const Sha
         else => {},
     }
 
-    comptime var layout_bindings: [binding_points.len]vk.DescriptorSetLayoutBinding = undefined;
-    comptime var desc_template_entries: [binding_points.len]vk.DescriptorUpdateTemplateEntry = undefined;
-    comptime var type_counts = std.EnumArray(ShaderBindingType, u32).initDefault(0, .{});
-    for (binding_points) |bind, i| {
-        if (!isBufferWrapper(bind[3])) {
+    comptime var layout_bindings: [parameter_decls.len]vk.DescriptorSetLayoutBinding = undefined;
+    comptime var desc_template_entries: [parameter_decls.len]vk.DescriptorUpdateTemplateEntry = undefined;
+    comptime var kind_counts = std.EnumArray(ShaderParameterKind, u32).initDefault(0, .{});
+    for (parameter_decls) |param, i| {
+        if (!isBufferWrapper(param.data_type)) {
             @compileError("Shader bindings must use buffer types");
         }
 
         layout_bindings[i] = .{
-            .binding = bind[1],
-            .descriptor_type = bind[2].toVk(),
+            .binding = param.binding,
+            .descriptor_type = param.kind.toVk(),
             .descriptor_count = 1,
             .stage_flags = .{ .compute_bit = true },
             .p_immutable_samplers = null,
@@ -233,21 +233,21 @@ pub fn Shader(comptime PushConstants: type, comptime binding_points: []const Sha
 
         // TODO: merge consecutive bindings
         desc_template_entries[i] = .{
-            .dst_binding = bind[1],
+            .dst_binding = param.binding,
             .dst_array_element = 0,
             .descriptor_count = 1,
-            .descriptor_type = bind[2].toVk(),
+            .descriptor_type = param.kind.toVk(),
             .offset = i * @sizeOf(vk.DescriptorBufferInfo),
             .stride = 0, // TODO
         };
 
-        type_counts.getPtr(bind[2]).* += 1;
+        kind_counts.getPtr(param.kind).* += 1;
     }
 
     const pool_sizes = blk: {
-        var pool_sizes: [type_counts.values.len]vk.DescriptorPoolSize = undefined;
+        var pool_sizes: [kind_counts.values.len]vk.DescriptorPoolSize = undefined;
         var i = 0;
-        var it = type_counts.iterator();
+        var it = kind_counts.iterator();
         while (it.next()) |entry| {
             if (entry.value.* > 0) {
                 pool_sizes[i] = .{
@@ -466,7 +466,7 @@ pub fn Shader(comptime PushConstants: type, comptime binding_points: []const Sha
             // Update descriptor set
             const desc_set = self.desc_sets[self.idx];
 
-            var descriptors: [binding_points.len]vk.DescriptorBufferInfo = undefined;
+            var descriptors: [parameter_decls.len]vk.DescriptorBufferInfo = undefined;
             inline for (std.meta.fields(Bindings)) |field, i| {
                 descriptors[i] = .{
                     .buffer = @field(bindings, field.name).buf,
@@ -546,14 +546,14 @@ pub fn Shader(comptime PushConstants: type, comptime binding_points: []const Sha
         }
 
         pub const Bindings = blk: {
-            var fields: [binding_points.len]std.builtin.TypeInfo.StructField = undefined;
-            for (binding_points) |bind, i| {
+            var fields: [parameter_decls.len]std.builtin.TypeInfo.StructField = undefined;
+            for (parameter_decls) |param, i| {
                 fields[i] = .{
-                    .name = bind[0],
-                    .field_type = bind[3],
+                    .name = param.name,
+                    .field_type = param.data_type,
                     .default_value = null,
                     .is_comptime = false,
-                    .alignment = @alignOf(bind[3]),
+                    .alignment = @alignOf(param.data_type),
                 };
             }
             break :blk @Type(.{ .Struct = .{
@@ -565,24 +565,6 @@ pub fn Shader(comptime PushConstants: type, comptime binding_points: []const Sha
         };
     };
 }
-pub const ShaderBinding = std.meta.Tuple(&.{
-    []const u8, // Field name
-    u32, // Binding index
-    ShaderBindingType, // Binding type
-    type, // Data type
-
-});
-pub const ShaderBindingType = enum {
-    uniform,
-    storage,
-
-    fn toVk(t: ShaderBindingType) vk.DescriptorType {
-        return switch (t) {
-            .uniform => .uniform_buffer,
-            .storage => .storage_buffer,
-        };
-    }
-};
 pub const ComputeDispatch = struct {
     x: u32 = 1,
     y: u32 = 1,
@@ -590,6 +572,41 @@ pub const ComputeDispatch = struct {
     baseX: u32 = 0,
     baseY: u32 = 0,
     baseZ: u32 = 0,
+};
+
+pub fn uniformBuffer(comptime name: []const u8, comptime binding: u32, comptime data_type: type) ShaderParameter {
+    return .{
+        .name = name,
+        .binding = binding,
+        .kind = .uniform,
+        .data_type = data_type,
+    };
+}
+pub fn storageBuffer(comptime name: []const u8, comptime binding: u32, comptime data_type: type) ShaderParameter {
+    return .{
+        .name = name,
+        .binding = binding,
+        .kind = .storage,
+        .data_type = data_type,
+    };
+}
+
+pub const ShaderParameter = struct {
+    name: []const u8,
+    binding: u32,
+    kind: ShaderParameterKind,
+    data_type: type,
+};
+pub const ShaderParameterKind = enum {
+    uniform,
+    storage,
+
+    fn toVk(t: ShaderParameterKind) vk.DescriptorType {
+        return switch (t) {
+            .uniform => .uniform_buffer,
+            .storage => .storage_buffer,
+        };
+    }
 };
 
 pub fn Buffer(comptime T: type) type {
