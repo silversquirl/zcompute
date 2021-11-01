@@ -200,7 +200,7 @@ pub const Context = struct {
     }
 };
 
-pub fn Shader(comptime binding_points: []const ShaderBinding) type {
+pub fn Shader(comptime PushConstants: type, comptime binding_points: []const ShaderBinding) type {
     comptime var layout_bindings: [binding_points.len]vk.DescriptorSetLayoutBinding = undefined;
     comptime var desc_template_entries: [binding_points.len]vk.DescriptorUpdateTemplateEntry = undefined;
     comptime var type_counts = std.EnumArray(ShaderBindingType, u32).initDefault(0, .{});
@@ -286,8 +286,12 @@ pub fn Shader(comptime binding_points: []const ShaderBinding) type {
                 .flags = .{},
                 .set_layout_count = 1,
                 .p_set_layouts = &[_]vk.DescriptorSetLayout{desc_layout},
-                .push_constant_range_count = 0,
-                .p_push_constant_ranges = undefined,
+                .push_constant_range_count = @boolToInt(@sizeOf(PushConstants) > 0),
+                .p_push_constant_ranges = &[1]vk.PushConstantRange{.{
+                    .stage_flags = .{ .compute_bit = true },
+                    .offset = 0,
+                    .size = @sizeOf(PushConstants),
+                }},
             }, &ctx.vk_alloc);
             errdefer ctx.vkd.destroyPipelineLayout(ctx.device, pipeline_layout, &ctx.vk_alloc);
 
@@ -438,7 +442,13 @@ pub fn Shader(comptime binding_points: []const ShaderBinding) type {
 
         /// Builds a new execution of the shader, waits for any previous execution to complete, then submits the execution.
         /// If you know any previous execution has completed prior to this exec call, pass 0 as the wait_timeout.
-        pub fn exec(self: *Self, wait_timeout: ?u64, dispatch: ComputeDispatch, bindings: Bindings) !void {
+        pub fn exec(
+            self: *Self,
+            wait_timeout: ?u64,
+            dispatch: ComputeDispatch,
+            push_constants: PushConstants,
+            bindings: Bindings,
+        ) !void {
             // Update descriptor set
             const desc_set = self.desc_sets[self.idx];
 
@@ -464,13 +474,27 @@ pub fn Shader(comptime binding_points: []const ShaderBinding) type {
                 .p_inheritance_info = null,
             });
 
+            // Bind pipeline
             self.ctx.vkd.cmdBindPipeline(cmd_buf, .compute, self.pipeline);
+            // Bind descriptor set
             self.ctx.vkd.cmdBindDescriptorSets(cmd_buf, // Why does this function not take a struct??
                 .compute, self.pipeline_layout, // pipeline info
                 0, 1, &[1]vk.DescriptorSet{desc_set}, // descriptor sets
                 0, undefined // dynamic offsets
             );
+            if (@sizeOf(PushConstants) > 0) {
+                // Send push constants
+                self.ctx.vkd.cmdPushConstants(
+                    cmd_buf,
+                    self.pipeline_layout,
+                    .{ .compute_bit = true },
+                    0,
+                    @sizeOf(PushConstants),
+                    @ptrCast(*const c_void, &push_constants),
+                );
+            }
 
+            // Dispatch compute
             self.ctx.vkd.cmdDispatchBase(
                 cmd_buf,
                 dispatch.baseX,
@@ -660,6 +684,7 @@ const DeviceDispatch = vk.DeviceWrapper(.{
     .CmdBindDescriptorSets,
     .CmdBindPipeline,
     .CmdDispatchBase,
+    .CmdPushConstants,
     .CreateBuffer,
     .CreateCommandPool,
     .CreateComputePipelines,

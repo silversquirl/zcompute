@@ -1,0 +1,14 @@
+// Compute shader to copy push constants to output buffer
+#version 450 core
+
+layout(push_constant) uniform Uniforms {
+	vec4 data;
+};
+layout(binding = 0) buffer Output {
+	vec4 buf[];
+};
+
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	buf[i] = data;
+}

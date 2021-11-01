@@ -74,7 +74,7 @@ test "compute shader" {
         data[0] = count;
     }
 
-    const Shader = zc.Shader(&[_]zc.ShaderBinding{
+    const Shader = zc.Shader(void, &[_]zc.ShaderBinding{
         .{ "count", 0, .uniform, zc.Buffer(u32) },
         .{ "in", 1, .storage, zc.Buffer(f32) },
         .{ "out", 2, .storage, zc.Buffer(f32) },
@@ -82,7 +82,7 @@ test "compute shader" {
     var shad = try Shader.initBytes(&ctx, @embedFile("test/copy.spv"));
     defer shad.deinit();
 
-    try shad.exec(0, .{ .x = count }, .{
+    try shad.exec(0, .{ .x = count }, {}, .{
         .count = count_buf,
         .in = in,
         .out = out,
@@ -94,6 +94,35 @@ test "compute shader" {
         defer out.unmap();
         for (data) |v, i| {
             try std.testing.expectEqual(@intToFloat(f32, i), v);
+        }
+    }
+}
+
+test "push constants" {
+    var ctx = try zc.Context.init(allocator);
+    defer ctx.deinit();
+
+    const count = 16;
+
+    const out = try zc.Buffer([4]f32).init(&ctx, count, .{ .map = true, .storage = true });
+    defer out.deinit();
+
+    const Shader = zc.Shader([4]f32, &[_]zc.ShaderBinding{
+        .{ "out", 0, .storage, zc.Buffer([4]f32) },
+    });
+    var shad = try Shader.initBytes(&ctx, @embedFile("test/push-constants.spv"));
+    defer shad.deinit();
+
+    try shad.exec(0, .{ .x = count }, .{ 0, 1, 2, 3 }, .{
+        .out = out,
+    });
+    try shad.wait();
+
+    {
+        const data = try out.map();
+        defer out.unmap();
+        for (data) |v| {
+            try std.testing.expectEqual([4]f32{ 0, 1, 2, 3 }, v);
         }
     }
 }
