@@ -18,18 +18,12 @@ pub fn main() !void {
     defer ctx.deinit();
 
     // Create a compute shader with the right interface
-    var shad = try zc.Shader(&[_]zc.ShaderBinding{
-        .{ "histogram_len", 0, .uniform, zc.Buffer(u32) },
-        .{ "histogram", 1, .storage, zc.Buffer(u32) },
+    var shad = try zc.Shader(extern struct {
+        histogram_len: u32, // This is a push constant
+    }, &[_]zc.ShaderBinding{
+        .{ "histogram", 1, .storage, zc.Buffer(u32) }, // This is a storage buffer
     }).initBytes(&ctx, @embedFile("collatz.spv"));
     defer shad.deinit();
-
-    // Allocate a buffer for our uniform data. This is just the histogram buffer length in this case
-    const uniforms_buf = try zc.Buffer(u32).init(&ctx, 1, .{
-        .map = true,
-        .uniform = true,
-    });
-    defer uniforms_buf.deinit();
 
     // Allocate a buffer for histogram data
     const histogram_buf = try zc.Buffer(u32).init(&ctx, histogram_len, .{
@@ -37,13 +31,6 @@ pub fn main() !void {
         .storage = true,
     });
     defer histogram_buf.deinit();
-
-    // Populate the uniform buffer with the data we need to send to the GPU
-    {
-        const uniforms_data = try uniforms_buf.map();
-        defer uniforms_buf.unmap();
-        uniforms_data[0] = histogram_len;
-    }
 
     // Execute the compute shader
     // We do this in multiple batches because the number of workgroups is too high to do all at once
@@ -63,8 +50,10 @@ pub fn main() !void {
                 .x = batch,
                 .baseX = n, // Start the current batch where the previous batch finished
             }, .{
-                // This is where we pass in the data, according to the format we defined when creating the shader type
-                .histogram_len = uniforms_buf,
+                // This is where we pass push constants to the shader
+                .histogram_len = histogram_len,
+            }, .{
+                // This is where we pass in output buffer, according to the format we defined when creating the shader type
                 .histogram = histogram_buf,
             });
             node.completeOne();

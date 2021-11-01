@@ -201,6 +201,17 @@ pub const Context = struct {
 };
 
 pub fn Shader(comptime PushConstants: type, comptime binding_points: []const ShaderBinding) type {
+    switch (@typeInfo(PushConstants)) {
+        .Struct => |info| if (info.layout == .Auto) {
+            @compileError("Push constant data should have defined layout. Use an extern struct (or a packed struct if you know what you're doing)");
+        },
+        .Union => |info| if (info.layout == .Auto) {
+            @compileError("Push constant data should have defined layout. Unions are a bad idea anyway, but if you must, use an extern or packed union");
+        },
+        // TODO: there's a lot more checking we could do here but I'm lazy
+        else => {},
+    }
+
     comptime var layout_bindings: [binding_points.len]vk.DescriptorSetLayoutBinding = undefined;
     comptime var desc_template_entries: [binding_points.len]vk.DescriptorUpdateTemplateEntry = undefined;
     comptime var type_counts = std.EnumArray(ShaderBindingType, u32).initDefault(0, .{});
