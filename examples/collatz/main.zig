@@ -18,9 +18,8 @@ pub fn main() !void {
     defer ctx.deinit();
 
     // Create a compute shader with the right interface
-    var shad = try zc.Shader(extern struct {
-        histogram_len: u32, // This is a push constant
-    }, &.{
+    var shad = try zc.Shader(&.{
+        zc.pushConstant("histogram_len", 0, u32), // This is a push constant
         zc.storageBuffer("histogram", 1, zc.Buffer(u32)), // This is a storage buffer
     }).initBytes(&ctx, @embedFile("collatz.spv"));
     defer shad.deinit();
@@ -50,10 +49,8 @@ pub fn main() !void {
                 .x = batch,
                 .baseX = n, // Start the current batch where the previous batch finished
             }, .{
-                // This is where we pass push constants to the shader
+                // This is where we pass parameters, according to the format we defined when creating the shader type
                 .histogram_len = histogram_len,
-            }, .{
-                // This is where we pass in output buffer, according to the format we defined when creating the shader type
                 .histogram = histogram_buf,
             });
             node.completeOne();

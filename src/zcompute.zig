@@ -203,64 +203,8 @@ pub const Context = struct {
     }
 };
 
-pub fn Shader(comptime PushConstants: type, comptime parameter_decls: []const ShaderParameter) type {
-    switch (@typeInfo(PushConstants)) {
-        .Struct => |info| if (info.layout == .Auto) {
-            @compileError("Push constant data should have defined layout. Use an extern struct (or a packed struct if you know what you're doing)");
-        },
-        .Union => |info| if (info.layout == .Auto) {
-            @compileError("Push constant data should have defined layout. Unions are a bad idea anyway, but if you must, use an extern or packed union");
-        },
-        // TODO: there's a lot more checking we could do here but I'm lazy
-        else => {},
-    }
-
-    comptime var layout_bindings: [parameter_decls.len]vk.DescriptorSetLayoutBinding = undefined;
-    comptime var desc_template_entries: [parameter_decls.len]vk.DescriptorUpdateTemplateEntry = undefined;
-    comptime var kind_counts = std.EnumArray(ShaderParameterKind, u32).initDefault(0, .{});
-    for (parameter_decls) |param, i| {
-        if (!isBufferWrapper(param.data_type)) {
-            @compileError("Shader bindings must use buffer types");
-        }
-
-        layout_bindings[i] = .{
-            .binding = param.binding,
-            .descriptor_type = param.kind.toVk(),
-            .descriptor_count = 1,
-            .stage_flags = .{ .compute_bit = true },
-            .p_immutable_samplers = null,
-        };
-
-        // TODO: merge consecutive bindings
-        desc_template_entries[i] = .{
-            .dst_binding = param.binding,
-            .dst_array_element = 0,
-            .descriptor_count = 1,
-            .descriptor_type = param.kind.toVk(),
-            .offset = i * @sizeOf(vk.DescriptorBufferInfo),
-            .stride = 0, // TODO
-        };
-
-        kind_counts.getPtr(param.kind).* += 1;
-    }
-
-    const pool_sizes = blk: {
-        var pool_sizes: [kind_counts.values.len]vk.DescriptorPoolSize = undefined;
-        var i = 0;
-        var it = kind_counts.iterator();
-        while (it.next()) |entry| {
-            if (entry.value.* > 0) {
-                pool_sizes[i] = .{
-                    .type = entry.key.toVk(),
-                    // Multiply by 2 because we need two descriptor sets
-                    .descriptor_count = 2 * entry.value.*,
-                };
-                i += 1;
-            }
-        }
-
-        break :blk pool_sizes[0..i].*;
-    };
+pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
+    const param_info = ShaderParamInfo.init(parameter_decls);
 
     return struct {
         ctx: *Context,
@@ -291,8 +235,8 @@ pub fn Shader(comptime PushConstants: type, comptime parameter_decls: []const Sh
             // TODO: cache descriptor sets?
             const desc_layout = try ctx.vkd.createDescriptorSetLayout(ctx.device, .{
                 .flags = .{},
-                .binding_count = @intCast(u32, layout_bindings.len),
-                .p_bindings = &layout_bindings,
+                .binding_count = @intCast(u32, param_info.desc_layout_bindings.len),
+                .p_bindings = param_info.desc_layout_bindings.ptr,
             }, &ctx.vk_alloc);
             errdefer ctx.vkd.destroyDescriptorSetLayout(ctx.device, desc_layout, &ctx.vk_alloc);
 
@@ -300,12 +244,8 @@ pub fn Shader(comptime PushConstants: type, comptime parameter_decls: []const Sh
                 .flags = .{},
                 .set_layout_count = 1,
                 .p_set_layouts = &[_]vk.DescriptorSetLayout{desc_layout},
-                .push_constant_range_count = @boolToInt(@sizeOf(PushConstants) > 0),
-                .p_push_constant_ranges = &[1]vk.PushConstantRange{.{
-                    .stage_flags = .{ .compute_bit = true },
-                    .offset = 0,
-                    .size = @sizeOf(PushConstants),
-                }},
+                .push_constant_range_count = param_info.push_constant_ranges.len,
+                .p_push_constant_ranges = param_info.push_constant_ranges.ptr,
             }, &ctx.vk_alloc);
             errdefer ctx.vkd.destroyPipelineLayout(ctx.device, pipeline_layout, &ctx.vk_alloc);
 
@@ -344,15 +284,15 @@ pub fn Shader(comptime PushConstants: type, comptime parameter_decls: []const Sh
             const desc_pool = try ctx.vkd.createDescriptorPool(ctx.device, .{
                 .flags = .{},
                 .max_sets = 2,
-                .pool_size_count = pool_sizes.len,
-                .p_pool_sizes = &pool_sizes,
+                .pool_size_count = param_info.desc_pool_sizes.len,
+                .p_pool_sizes = param_info.desc_pool_sizes.ptr,
             }, &ctx.vk_alloc);
             errdefer ctx.vkd.destroyDescriptorPool(ctx.device, desc_pool, &ctx.vk_alloc);
 
             const desc_template = try ctx.vkd.createDescriptorUpdateTemplate(ctx.device, .{
                 .flags = .{},
-                .descriptor_update_entry_count = desc_template_entries.len,
-                .p_descriptor_update_entries = &desc_template_entries,
+                .descriptor_update_entry_count = param_info.desc_template_entries.len,
+                .p_descriptor_update_entries = param_info.desc_template_entries.ptr,
                 .template_type = .descriptor_set,
                 .descriptor_set_layout = desc_layout,
                 // These fields are ignored in Vulkan 1.1, but we have them so we might as well provide them
@@ -460,16 +400,15 @@ pub fn Shader(comptime PushConstants: type, comptime parameter_decls: []const Sh
             self: *Self,
             wait_timeout: ?u64,
             dispatch: ComputeDispatch,
-            push_constants: PushConstants,
-            bindings: Bindings,
+            param_data: Params,
         ) !void {
             // Update descriptor set
             const desc_set = self.desc_sets[self.idx];
 
-            var descriptors: [parameter_decls.len]vk.DescriptorBufferInfo = undefined;
-            inline for (std.meta.fields(Bindings)) |field, i| {
+            var descriptors: [param_info.desc_binding_names.len]vk.DescriptorBufferInfo = undefined;
+            inline for (param_info.desc_binding_names) |name, i| {
                 descriptors[i] = .{
-                    .buffer = @field(bindings, field.name).buf,
+                    .buffer = @field(param_data, name).buf,
                     .offset = 0,
                     .range = vk.WHOLE_SIZE,
                 };
@@ -490,21 +429,27 @@ pub fn Shader(comptime PushConstants: type, comptime parameter_decls: []const Sh
 
             // Bind pipeline
             self.ctx.vkd.cmdBindPipeline(cmd_buf, .compute, self.pipeline);
+
             // Bind descriptor set
             self.ctx.vkd.cmdBindDescriptorSets(cmd_buf, // Why does this function not take a struct??
                 .compute, self.pipeline_layout, // pipeline info
                 0, 1, &[1]vk.DescriptorSet{desc_set}, // descriptor sets
                 0, undefined // dynamic offsets
             );
-            if (@sizeOf(PushConstants) > 0) {
-                // Send push constants
+
+            // Send push constants
+            inline for (param_info.push_constant_names) |name, i| {
+                const push_data = @field(param_data, name);
+                const range = param_info.push_constant_ranges[i];
+                comptime std.debug.assert(range.size == @sizeOf(@TypeOf(push_data)));
+
                 self.ctx.vkd.cmdPushConstants(
                     cmd_buf,
                     self.pipeline_layout,
-                    .{ .compute_bit = true },
-                    0,
-                    @sizeOf(PushConstants),
-                    @ptrCast(*const c_void, &push_constants),
+                    range.stage_flags,
+                    range.offset,
+                    range.size,
+                    @ptrCast(*const c_void, &push_data),
                 );
             }
 
@@ -545,24 +490,7 @@ pub fn Shader(comptime PushConstants: type, comptime parameter_decls: []const Sh
             self.idx ^= 1;
         }
 
-        pub const Bindings = blk: {
-            var fields: [parameter_decls.len]std.builtin.TypeInfo.StructField = undefined;
-            for (parameter_decls) |param, i| {
-                fields[i] = .{
-                    .name = param.name,
-                    .field_type = param.data_type,
-                    .default_value = null,
-                    .is_comptime = false,
-                    .alignment = @alignOf(param.data_type),
-                };
-            }
-            break :blk @Type(.{ .Struct = .{
-                .layout = .Auto,
-                .fields = &fields,
-                .decls = &.{},
-                .is_tuple = false,
-            } });
-        };
+        pub const Params = param_info.params_type;
     };
 }
 pub const ComputeDispatch = struct {
@@ -577,7 +505,7 @@ pub const ComputeDispatch = struct {
 pub fn uniformBuffer(comptime name: []const u8, comptime binding: u32, comptime data_type: type) ShaderParameter {
     return .{
         .name = name,
-        .binding = binding,
+        .idx = binding,
         .kind = .uniform,
         .data_type = data_type,
     };
@@ -585,29 +513,182 @@ pub fn uniformBuffer(comptime name: []const u8, comptime binding: u32, comptime 
 pub fn storageBuffer(comptime name: []const u8, comptime binding: u32, comptime data_type: type) ShaderParameter {
     return .{
         .name = name,
-        .binding = binding,
+        .idx = binding,
         .kind = .storage,
+        .data_type = data_type,
+    };
+}
+pub fn pushConstant(comptime name: []const u8, comptime offset: u32, comptime data_type: type) ShaderParameter {
+    return .{
+        .name = name,
+        .idx = offset,
+        .kind = .push_constant,
         .data_type = data_type,
     };
 }
 
 pub const ShaderParameter = struct {
     name: []const u8,
-    binding: u32,
+    idx: u32, // Binding index for storage and uniform, offset for push_constant
     kind: ShaderParameterKind,
     data_type: type,
 };
 pub const ShaderParameterKind = enum {
     uniform,
     storage,
+    push_constant,
 
     fn toVk(t: ShaderParameterKind) vk.DescriptorType {
         return switch (t) {
             .uniform => .uniform_buffer,
             .storage => .storage_buffer,
+            .push_constant => unreachable,
         };
     }
 };
+
+const ShaderParamInfo = struct {
+    push_constant_names: []const []const u8,
+    push_constant_ranges: []const vk.PushConstantRange,
+
+    desc_binding_names: []const []const u8,
+    desc_layout_bindings: []const vk.DescriptorSetLayoutBinding,
+    desc_template_entries: []const vk.DescriptorUpdateTemplateEntry,
+    desc_pool_sizes: []const vk.DescriptorPoolSize,
+
+    params_type: type,
+
+    fn init(comptime params: []const ShaderParameter) ShaderParamInfo {
+        var kind_counts = std.EnumArray(ShaderParameterKind, u32).initDefault(0, .{});
+        var fields: [params.len]std.builtin.TypeInfo.StructField = undefined;
+
+        var push_constant_names: [params.len][]const u8 = undefined;
+        var push_constant_ranges: [params.len]vk.PushConstantRange = undefined;
+        var push_constant_i = 0;
+
+        var desc_binding_names: [params.len][]const u8 = undefined;
+        var desc_layout_bindings: [params.len]vk.DescriptorSetLayoutBinding = undefined;
+        var desc_template_entries: [params.len]vk.DescriptorUpdateTemplateEntry = undefined;
+        var desc_i = 0;
+
+        for (params) |param, i| {
+            fields[i] = .{
+                .name = param.name,
+                .field_type = param.data_type,
+                .default_value = null,
+                .is_comptime = false,
+                .alignment = @alignOf(param.data_type),
+            };
+
+            if (param.kind == .push_constant) {
+                switch (@typeInfo(param.data_type)) {
+                    .Struct => |info| if (info.layout == .Auto) {
+                        @compileError("Push constant data should have defined layout. Use an extern struct (or a packed struct if you know what you're doing)");
+                    },
+                    .Union => |info| if (info.layout == .Auto) {
+                        @compileError("Push constant data should have defined layout. Unions are a bad idea anyway, but if you must, use an extern or packed union");
+                    },
+                    // TODO: there's a lot more checking we could do here but I'm lazy
+                    else => {},
+                }
+
+                push_constant_names[push_constant_i] = param.name;
+
+                push_constant_ranges[push_constant_i] = .{
+                    .stage_flags = .{ .compute_bit = true },
+                    .offset = param.idx,
+                    .size = @sizeOf(param.data_type),
+                };
+
+                push_constant_i += 1;
+            } else {
+                if (!isBufferWrapper(param.data_type)) {
+                    @compileError("Shader bindings must use buffer types");
+                }
+
+                desc_binding_names[desc_i] = param.name;
+
+                desc_layout_bindings[desc_i] = .{
+                    .binding = param.idx,
+                    .descriptor_type = param.kind.toVk(),
+                    .descriptor_count = 1,
+                    .stage_flags = .{ .compute_bit = true },
+                    .p_immutable_samplers = null,
+                };
+
+                // TODO: merge consecutive bindings
+                desc_template_entries[desc_i] = .{
+                    .dst_binding = param.idx,
+                    .dst_array_element = 0,
+                    .descriptor_count = 1,
+                    .descriptor_type = param.kind.toVk(),
+                    .offset = desc_i * @sizeOf(vk.DescriptorBufferInfo),
+                    .stride = 0, // TODO
+                };
+
+                kind_counts.getPtr(param.kind).* += 1;
+
+                desc_i += 1;
+            }
+        }
+
+        var pool_sizes: [kind_counts.values.len]vk.DescriptorPoolSize = undefined;
+        var pool_i = 0;
+        var it = kind_counts.iterator();
+        while (it.next()) |entry| {
+            if (entry.value.* > 0) {
+                pool_sizes[pool_i] = .{
+                    .type = entry.key.toVk(),
+                    // Multiply by 2 because we need two descriptor sets
+                    .descriptor_count = 2 * entry.value.*,
+                };
+                pool_i += 1;
+            }
+        }
+
+        // We copy the arrays in order to remove unused elements from the binary
+        return .{
+            .push_constant_names = comptimeDupe(
+                []const u8,
+                push_constant_names[0..push_constant_i],
+            ),
+            .push_constant_ranges = comptimeDupe(
+                vk.PushConstantRange,
+                push_constant_ranges[0..push_constant_i],
+            ),
+
+            .desc_binding_names = comptimeDupe(
+                []const u8,
+                desc_binding_names[0..desc_i],
+            ),
+            .desc_layout_bindings = comptimeDupe(
+                vk.DescriptorSetLayoutBinding,
+                desc_layout_bindings[0..desc_i],
+            ),
+            .desc_template_entries = comptimeDupe(
+                vk.DescriptorUpdateTemplateEntry,
+                desc_template_entries[0..desc_i],
+            ),
+            .desc_pool_sizes = comptimeDupe(
+                vk.DescriptorPoolSize,
+                pool_sizes[0..pool_i],
+            ),
+
+            .params_type = @Type(.{ .Struct = .{
+                .layout = .Auto,
+                .fields = &fields,
+                .decls = &.{},
+                .is_tuple = false,
+            } }),
+        };
+    }
+};
+// TODO(compiler bug): replace this with x**1
+fn comptimeDupe(comptime T: type, comptime x: []const T) []const T {
+    var y: [x.len]T = undefined;
+    std.mem.copy(T, &y, x);
+    return &y;
+}
 
 pub fn Buffer(comptime T: type) type {
     return struct {
