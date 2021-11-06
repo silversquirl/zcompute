@@ -5,7 +5,7 @@
 layout(push_constant) uniform Uniforms {
 	uint histogram_len;
 };
-layout(binding = 1) buffer Output {
+layout(binding = 0) buffer Output {
 	uint histogram[];
 };
 
