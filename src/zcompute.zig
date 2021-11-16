@@ -11,8 +11,7 @@ pub const Context = struct {
     compute_dispatch_limits: [3]u32, // Maximum size of each compute dispatch dimension
 
     // Internal fields:
-    allocator: *std.mem.Allocator,
-    vk_alloc: vk.AllocationCallbacks,
+    allocation_callbacks: ?vk.AllocationCallbacks,
 
     vkb: BaseDispatch,
     vki: InstanceDispatch,
@@ -31,25 +30,24 @@ pub const Context = struct {
     /// WARNING: Using a GPA with nonzero stack_trace_frames may cause random segmentation faults
     pub fn init(allocator: *std.mem.Allocator) !Context {
         var self: Context = undefined;
-        self.allocator = allocator;
-        self.vk_alloc = vk_allocator.wrap(allocator);
+        self.allocation_callbacks = vk_allocator.wrap(allocator);
 
         try loader.ref();
         errdefer loader.deref();
         self.vkb = try BaseDispatch.load(loader.getProcAddress);
 
         try self.initInstance(allocator);
-        errdefer self.vki.destroyInstance(self.instance, &self.vk_alloc);
+        errdefer self.vki.destroyInstance(self.instance, self.vkAlloc());
 
         try self.initDevice(allocator);
-        errdefer self.vkd.destroyDevice(self.device, &self.vk_alloc);
+        errdefer self.vkd.destroyDevice(self.device, self.vkAlloc());
 
         return self;
     }
 
     pub fn deinit(self: Context) void {
-        self.vkd.destroyDevice(self.device, &self.vk_alloc);
-        self.vki.destroyInstance(self.instance, &self.vk_alloc);
+        self.vkd.destroyDevice(self.device, self.vkAlloc());
+        self.vki.destroyInstance(self.instance, self.vkAlloc());
         loader.deref();
     }
 
@@ -72,7 +70,7 @@ pub const Context = struct {
             .pp_enabled_layer_names = layers.ptr,
             .enabled_extension_count = 0,
             .pp_enabled_extension_names = undefined,
-        }, &self.vk_alloc);
+        }, self.vkAlloc());
         self.vki = try InstanceDispatch.load(self.instance, self.vkb.dispatch.vkGetInstanceProcAddr);
     }
 
@@ -162,11 +160,18 @@ pub const Context = struct {
             .enabled_extension_count = 0,
             .pp_enabled_extension_names = undefined,
             .p_enabled_features = null,
-        }, &self.vk_alloc);
+        }, self.vkAlloc());
         self.vkd = try DeviceDispatch.load(self.device, self.vki.dispatch.vkGetDeviceProcAddr);
-        errdefer self.vkd.destroyDevice(self.device, &self.vk_alloc);
+        errdefer self.vkd.destroyDevice(self.device, self.vkAlloc());
 
         self.queue = self.vkd.getDeviceQueue(self.device, self.queue_family, 0);
+    }
+
+    fn vkAlloc(self: *const Context) ?*const vk.AllocationCallbacks {
+        if (self.allocation_callbacks) |*cb| {
+            return cb;
+        }
+        return null;
     }
 
     fn alloc(self: *Context, size: u64, mem_type_bits: u32, flags: vk.MemoryPropertyFlags) !vk.DeviceMemory {
@@ -179,11 +184,11 @@ pub const Context = struct {
         return self.vkd.allocateMemory(self.device, .{
             .allocation_size = size,
             .memory_type_index = mem_type_idx,
-        }, &self.vk_alloc);
+        }, self.vkAlloc());
     }
     fn free(self: *Context, mem: vk.DeviceMemory) void {
         self.alloc_count -= 1;
-        self.vkd.freeMemory(self.device, mem, &self.vk_alloc);
+        self.vkd.freeMemory(self.device, mem, self.vkAlloc());
     }
 
     fn findMemoryType(self: Context, size: u64, mem_type_bits: u32, flags: vk.MemoryPropertyFlags) ?u32 {
@@ -229,16 +234,16 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
                 .flags = .{},
                 .code_size = 4 * code.len,
                 .p_code = code.ptr,
-            }, &ctx.vk_alloc);
-            defer ctx.vkd.destroyShaderModule(ctx.device, module, &ctx.vk_alloc);
+            }, ctx.vkAlloc());
+            defer ctx.vkd.destroyShaderModule(ctx.device, module, ctx.vkAlloc());
 
             // TODO: cache descriptor sets?
             const desc_layout = try ctx.vkd.createDescriptorSetLayout(ctx.device, .{
                 .flags = .{},
                 .binding_count = @intCast(u32, param_info.desc_layout_bindings.len),
                 .p_bindings = param_info.desc_layout_bindings.ptr,
-            }, &ctx.vk_alloc);
-            errdefer ctx.vkd.destroyDescriptorSetLayout(ctx.device, desc_layout, &ctx.vk_alloc);
+            }, ctx.vkAlloc());
+            errdefer ctx.vkd.destroyDescriptorSetLayout(ctx.device, desc_layout, ctx.vkAlloc());
 
             const pipeline_layout = try ctx.vkd.createPipelineLayout(ctx.device, .{
                 .flags = .{},
@@ -246,8 +251,8 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
                 .p_set_layouts = &[_]vk.DescriptorSetLayout{desc_layout},
                 .push_constant_range_count = param_info.push_constant_ranges.len,
                 .p_push_constant_ranges = param_info.push_constant_ranges.ptr,
-            }, &ctx.vk_alloc);
-            errdefer ctx.vkd.destroyPipelineLayout(ctx.device, pipeline_layout, &ctx.vk_alloc);
+            }, ctx.vkAlloc());
+            errdefer ctx.vkd.destroyPipelineLayout(ctx.device, pipeline_layout, ctx.vkAlloc());
 
             var pipeline: [1]vk.Pipeline = undefined;
             _ = try ctx.vkd.createComputePipelines(
@@ -267,10 +272,10 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
                     .base_pipeline_handle = .null_handle,
                     .base_pipeline_index = 0,
                 }},
-                &ctx.vk_alloc,
+                ctx.vkAlloc(),
                 &pipeline,
             );
-            errdefer ctx.vkd.destroyPipeline(ctx.device, pipeline[0], &ctx.vk_alloc);
+            errdefer ctx.vkd.destroyPipeline(ctx.device, pipeline[0], ctx.vkAlloc());
 
             const cmd_pool = try ctx.vkd.createCommandPool(ctx.device, .{
                 .flags = .{
@@ -278,16 +283,16 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
                     .reset_command_buffer_bit = true,
                 },
                 .queue_family_index = ctx.queue_family,
-            }, &ctx.vk_alloc);
-            errdefer ctx.vkd.destroyCommandPool(ctx.device, cmd_pool, &ctx.vk_alloc);
+            }, ctx.vkAlloc());
+            errdefer ctx.vkd.destroyCommandPool(ctx.device, cmd_pool, ctx.vkAlloc());
 
             const desc_pool = try ctx.vkd.createDescriptorPool(ctx.device, .{
                 .flags = .{},
                 .max_sets = 2,
                 .pool_size_count = param_info.desc_pool_sizes.len,
                 .p_pool_sizes = param_info.desc_pool_sizes.ptr,
-            }, &ctx.vk_alloc);
-            errdefer ctx.vkd.destroyDescriptorPool(ctx.device, desc_pool, &ctx.vk_alloc);
+            }, ctx.vkAlloc());
+            errdefer ctx.vkd.destroyDescriptorPool(ctx.device, desc_pool, ctx.vkAlloc());
 
             const desc_template = try ctx.vkd.createDescriptorUpdateTemplate(ctx.device, .{
                 .flags = .{},
@@ -299,13 +304,13 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
                 .pipeline_bind_point = .compute,
                 .pipeline_layout = pipeline_layout,
                 .set = undefined, // idk what this one is
-            }, &ctx.vk_alloc);
-            errdefer ctx.vkd.destroyDescriptorUpdateTemplate(ctx.device, desc_template, &ctx.vk_alloc);
+            }, ctx.vkAlloc());
+            errdefer ctx.vkd.destroyDescriptorUpdateTemplate(ctx.device, desc_template, ctx.vkAlloc());
 
             const fence = try ctx.vkd.createFence(ctx.device, .{
                 .flags = .{ .signaled_bit = true },
-            }, &ctx.vk_alloc);
-            errdefer ctx.vkd.destroyFence(ctx.device, fence, &ctx.vk_alloc);
+            }, ctx.vkAlloc());
+            errdefer ctx.vkd.destroyFence(ctx.device, fence, ctx.vkAlloc());
 
             var cmd_bufs: [2]vk.CommandBuffer = undefined;
             try ctx.vkd.allocateCommandBuffers(ctx.device, .{
@@ -356,8 +361,9 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
             };
 
             // Read SPIR-V
-            const code32 = try ctx.allocator.alloc(u32, @divExact(code.len, 4));
-            defer ctx.allocator.free(code32);
+            const allocator = vk_allocator.unwrap(ctx.vkAlloc());
+            const code32 = try allocator.alloc(u32, @divExact(code.len, 4));
+            defer allocator.free(code32);
             for (code32) |*v, i| {
                 v.* = std.mem.readIntSlice(u32, code[i * 4 ..], endian);
             }
@@ -367,13 +373,13 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
         }
 
         pub fn deinit(self: Self) void {
-            self.ctx.vkd.destroyFence(self.ctx.device, self.fence, &self.ctx.vk_alloc);
-            self.ctx.vkd.destroyDescriptorUpdateTemplate(self.ctx.device, self.desc_template, &self.ctx.vk_alloc);
-            self.ctx.vkd.destroyDescriptorPool(self.ctx.device, self.desc_pool, &self.ctx.vk_alloc);
-            self.ctx.vkd.destroyCommandPool(self.ctx.device, self.cmd_pool, &self.ctx.vk_alloc);
-            self.ctx.vkd.destroyPipeline(self.ctx.device, self.pipeline, &self.ctx.vk_alloc);
-            self.ctx.vkd.destroyPipelineLayout(self.ctx.device, self.pipeline_layout, &self.ctx.vk_alloc);
-            self.ctx.vkd.destroyDescriptorSetLayout(self.ctx.device, self.desc_layout, &self.ctx.vk_alloc);
+            self.ctx.vkd.destroyFence(self.ctx.device, self.fence, self.ctx.vkAlloc());
+            self.ctx.vkd.destroyDescriptorUpdateTemplate(self.ctx.device, self.desc_template, self.ctx.vkAlloc());
+            self.ctx.vkd.destroyDescriptorPool(self.ctx.device, self.desc_pool, self.ctx.vkAlloc());
+            self.ctx.vkd.destroyCommandPool(self.ctx.device, self.cmd_pool, self.ctx.vkAlloc());
+            self.ctx.vkd.destroyPipeline(self.ctx.device, self.pipeline, self.ctx.vkAlloc());
+            self.ctx.vkd.destroyPipelineLayout(self.ctx.device, self.pipeline_layout, self.ctx.vkAlloc());
+            self.ctx.vkd.destroyDescriptorSetLayout(self.ctx.device, self.desc_layout, self.ctx.vkAlloc());
         }
 
         /// Waits indefinitely for the current execution to complete
@@ -714,8 +720,8 @@ pub fn Buffer(comptime T: type) type {
                 .p_queue_family_indices = &[_]u32{
                     ctx.queue_family,
                 },
-            }, &ctx.vk_alloc);
-            errdefer ctx.vkd.destroyBuffer(ctx.device, buf, &ctx.vk_alloc);
+            }, ctx.vkAlloc());
+            errdefer ctx.vkd.destroyBuffer(ctx.device, buf, ctx.vkAlloc());
 
             const reqs = ctx.vkd.getBufferMemoryRequirements(ctx.device, buf);
             const mem = try ctx.alloc(reqs.size, reqs.memory_type_bits, .{
@@ -736,7 +742,7 @@ pub fn Buffer(comptime T: type) type {
 
         pub fn deinit(self: Self) void {
             self.ctx.free(self.mem);
-            self.ctx.vkd.destroyBuffer(self.ctx.device, self.buf, &self.ctx.vk_alloc);
+            self.ctx.vkd.destroyBuffer(self.ctx.device, self.buf, self.ctx.vkAlloc());
         }
 
         const min_map_align = 64; // Spec requires min_memory_map_alignment limit to be at least 64
