@@ -890,7 +890,7 @@ const Loader = struct {
         const lib_name = switch (builtin.os.tag) {
             .windows => "vulkan-1.dll",
             else => "libvulkan.so.1",
-            .macos => @compileError("Unsupported platform: " ++ @tagName(builtin.os)),
+            .macos => @compileError("Unsupported platform: " ++ @tagName(builtin.os.tag)),
         };
         if (!builtin.link_libc) {
             @compileError("zcompute requires libc to be linked");
