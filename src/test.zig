@@ -9,12 +9,12 @@ var allocator_instance = std.heap.GeneralPurposeAllocator(.{
 const allocator = &allocator_instance.allocator;
 
 test "initialization" {
-    var ctx = try zc.Context.init(allocator);
+    var ctx = try zc.Context.init(allocator, .{});
     ctx.deinit();
 }
 
 test "buffer mapping" {
-    var ctx = try zc.Context.init(allocator);
+    var ctx = try zc.Context.init(allocator, .{});
     defer ctx.deinit();
 
     const buf = try zc.Buffer([2]f32).init(&ctx, 6, .{ .map = true, .uniform = true });
@@ -48,7 +48,7 @@ test "buffer mapping" {
 }
 
 test "compute shader" {
-    var ctx = try zc.Context.init(allocator);
+    var ctx = try zc.Context.init(allocator, .{});
     defer ctx.deinit();
 
     const count = 16;
@@ -99,7 +99,7 @@ test "compute shader" {
 }
 
 test "push constants" {
-    var ctx = try zc.Context.init(allocator);
+    var ctx = try zc.Context.init(allocator, .{});
     defer ctx.deinit();
 
     const count = 16;

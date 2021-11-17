@@ -6,6 +6,8 @@ const vk = @import("vk.zig");
 const vk_allocator = @import("vk_allocator.zig");
 const log = std.log.scoped(.zcompute);
 
+pub const VkDeviceFeatures = vk.PhysicalDeviceFeatures;
+
 pub const Context = struct {
     // Public fields:
     compute_dispatch_limits: [3]u32, // Maximum size of each compute dispatch dimension
@@ -27,8 +29,13 @@ pub const Context = struct {
     alloc_count: u32 = 0,
     alloc_max: u32,
 
+    const InitOptions = struct {
+        vulkan_device_extensions: [][*:0]const u8 = &.{},
+        vulkan_device_features: VkDeviceFeatures = .{},
+    };
+
     /// WARNING: Using a GPA with nonzero stack_trace_frames may cause random segmentation faults
-    pub fn init(allocator: *std.mem.Allocator) !Context {
+    pub fn init(allocator: *std.mem.Allocator, opts: InitOptions) !Context {
         var self: Context = undefined;
         self.allocation_callbacks = vk_allocator.wrap(allocator);
 
@@ -39,7 +46,7 @@ pub const Context = struct {
         try self.initInstance(allocator);
         errdefer self.vki.destroyInstance(self.instance, self.vkAlloc());
 
-        try self.initDevice(allocator);
+        try self.initDevice(allocator, opts);
         errdefer self.vkd.destroyDevice(self.device, self.vkAlloc());
 
         return self;
@@ -109,7 +116,7 @@ pub const Context = struct {
         return allocator.dupe([*:0]const u8, layers[0..n_layers]);
     }
 
-    fn initDevice(self: *Context, allocator: *std.mem.Allocator) !void {
+    fn initDevice(self: *Context, allocator: *std.mem.Allocator, opts: InitOptions) !void {
         // Find best physical device
         var n_devices: u32 = undefined;
         _ = try self.vki.enumeratePhysicalDevices(self.instance, &n_devices, null);
@@ -117,7 +124,39 @@ pub const Context = struct {
         defer allocator.free(devices);
         _ = try self.vki.enumeratePhysicalDevices(self.instance, &n_devices, devices.ptr);
 
+        var ext_set = std.StringHashMap(void).init(allocator);
+        for (opts.vulkan_device_extensions) |ext| {
+            try ext_set.put(std.mem.span(ext), {});
+        }
+
         self.phys_device = for (devices[0..n_devices]) |dev| {
+            // Check device features
+            const features = self.vki.getPhysicalDeviceFeatures(dev);
+            const ok = inline for (comptime std.meta.fieldNames(VkDeviceFeatures)) |field| {
+                const want = @field(opts.vulkan_device_features, field) != 0;
+                const have = @field(features, field) != 0;
+                if (want and !have) {
+                    break false;
+                }
+            } else true;
+            if (!ok) continue;
+
+            // Check device extensions
+            var n_exts: u32 = undefined;
+            _ = try self.vki.enumerateDeviceExtensionProperties(dev, null, &n_exts, null);
+            const exts = try allocator.alloc(vk.ExtensionProperties, n_exts);
+            _ = try self.vki.enumerateDeviceExtensionProperties(dev, null, &n_exts, exts.ptr);
+            var n_matched: u32 = 0;
+            for (exts[0..n_exts]) |props| {
+                const name = std.mem.sliceTo(&props.extension_name, 0);
+                if (ext_set.contains(name)) n_matched += 1;
+            }
+            if (n_matched < opts.vulkan_device_extensions.len) {
+                continue;
+            }
+            std.debug.assert(n_matched == opts.vulkan_device_extensions.len);
+
+            // Check queue families
             var n_queues: u32 = undefined;
             self.vki.getPhysicalDeviceQueueFamilyProperties(dev, &n_queues, null);
             const queues = try allocator.alloc(vk.QueueFamilyProperties, n_queues);
@@ -157,9 +196,9 @@ pub const Context = struct {
             .p_queue_create_infos = &queue_infos,
             .enabled_layer_count = 0,
             .pp_enabled_layer_names = undefined,
-            .enabled_extension_count = 0,
-            .pp_enabled_extension_names = undefined,
-            .p_enabled_features = null,
+            .enabled_extension_count = @intCast(u32, opts.vulkan_device_extensions.len),
+            .pp_enabled_extension_names = opts.vulkan_device_extensions.ptr,
+            .p_enabled_features = &opts.vulkan_device_features,
         }, self.vkAlloc());
         self.vkd = try DeviceDispatch.load(self.device, self.vki.dispatch.vkGetDeviceProcAddr);
         errdefer self.vkd.destroyDevice(self.device, self.vkAlloc());
@@ -788,6 +827,7 @@ const InstanceDispatch = vk.InstanceWrapper(.{
     .EnumerateDeviceExtensionProperties,
     .EnumeratePhysicalDevices,
     .GetDeviceProcAddr,
+    .GetPhysicalDeviceFeatures,
     .GetPhysicalDeviceMemoryProperties,
     .GetPhysicalDeviceProperties,
     .GetPhysicalDeviceQueueFamilyProperties,

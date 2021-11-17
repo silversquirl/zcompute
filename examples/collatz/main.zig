@@ -14,7 +14,7 @@ pub fn main() !void {
 
     // Create a new zcompute context
     // This sets up a link to the GPU, and is required for all usage of the library
-    var ctx = try zc.Context.init(allocator);
+    var ctx = try zc.Context.init(allocator, .{});
     defer ctx.deinit();
 
     // Create a compute shader with the right interface
