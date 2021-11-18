@@ -2,17 +2,20 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const vk = @import("vk.zig");
+pub const vk = @import("vk.zig");
 const vk_allocator = @import("vk_allocator.zig");
 const log = std.log.scoped(.zcompute);
 
 pub const VkDeviceFeatures = vk.PhysicalDeviceFeatures;
 
 pub const Context = struct {
-    // Public fields:
+    // Public fields
     compute_dispatch_limits: [3]u32, // Maximum size of each compute dispatch dimension
 
-    // Internal fields:
+    // Public-ish fields - usable, but be careful
+    device_properties: vk.PhysicalDeviceProperties,
+
+    // Internal fields - only use if you know exactly what you're doing
     allocation_callbacks: ?vk.AllocationCallbacks,
 
     vkb: BaseDispatch,
@@ -177,7 +180,7 @@ pub const Context = struct {
         };
 
         const props = self.vki.getPhysicalDeviceProperties(self.phys_device);
-        self.alloc_max = props.limits.max_memory_allocation_count;
+        self.device_properties = props;
         self.compute_dispatch_limits = props.limits.max_compute_work_group_count;
 
         // Create logical device
@@ -214,7 +217,7 @@ pub const Context = struct {
     }
 
     fn alloc(self: *Context, size: u64, mem_type_bits: u32, flags: vk.MemoryPropertyFlags) !vk.DeviceMemory {
-        if (self.alloc_count >= self.alloc_max) {
+        if (self.alloc_count >= self.device_properties.limits.max_memory_allocation_count) {
             return error.OutOfDeviceMemory;
         }
         const mem_type_idx = self.findMemoryType(size, mem_type_bits, flags) orelse {
