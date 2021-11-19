@@ -224,10 +224,12 @@ pub const Context = struct {
         const mem_type_idx = self.findMemoryType(size, mem_type_bits, flags) orelse {
             return error.UnsupportedAllocationFlags;
         };
-        return self.vkd.allocateMemory(self.device, .{
+        const mem = try self.vkd.allocateMemory(self.device, .{
             .allocation_size = size,
             .memory_type_index = mem_type_idx,
         }, self.vkAlloc());
+        self.alloc_count += 1;
+        return mem;
     }
     fn free(self: *Context, mem: vk.DeviceMemory) void {
         self.alloc_count -= 1;
