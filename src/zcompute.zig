@@ -29,7 +29,7 @@ pub const Context = struct {
     queue_family: u32,
     queue: vk.Queue,
 
-    alloc_count: u32 = 0,
+    alloc_count: u32,
     alloc_max: u32,
 
     const InitOptions = struct {
@@ -40,6 +40,7 @@ pub const Context = struct {
     /// WARNING: Using a GPA with nonzero stack_trace_frames may cause random segmentation faults
     pub fn init(allocator: *std.mem.Allocator, opts: InitOptions) !Context {
         var self: Context = undefined;
+        self.alloc_count = 0;
         self.allocation_callbacks = vk_allocator.wrap(allocator);
 
         try loader.ref();
