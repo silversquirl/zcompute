@@ -67,7 +67,7 @@ pub const Context = struct {
         const layers = try self.instanceLayers(allocator);
         defer allocator.free(layers);
 
-        self.instance = try self.vkb.createInstance(.{
+        self.instance = try self.vkb.createInstance(&.{
             .flags = .{},
             .p_application_info = &.{
                 .p_application_name = app_name,
@@ -194,7 +194,7 @@ pub const Context = struct {
             },
         };
 
-        self.device = try self.vki.createDevice(self.phys_device, .{
+        self.device = try self.vki.createDevice(self.phys_device, &.{
             .flags = .{},
             .queue_create_info_count = queue_infos.len,
             .p_queue_create_infos = &queue_infos,
@@ -217,7 +217,7 @@ pub const Context = struct {
         const mem_type_idx = self.findMemoryType(size, mem_type_bits, flags) orelse {
             return error.UnsupportedAllocationFlags;
         };
-        const mem = try self.vkd.allocateMemory(self.device, .{
+        const mem = try self.vkd.allocateMemory(self.device, &.{
             .allocation_size = size,
             .memory_type_index = mem_type_idx,
         }, null);
@@ -268,7 +268,7 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
 
         // Creates a shader from an array of native-endian u32
         pub fn init(ctx: *Context, code: []const u32) !Self {
-            const module = try ctx.vkd.createShaderModule(ctx.device, .{
+            const module = try ctx.vkd.createShaderModule(ctx.device, &.{
                 .flags = .{},
                 .code_size = 4 * code.len,
                 .p_code = code.ptr,
@@ -276,14 +276,14 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
             defer ctx.vkd.destroyShaderModule(ctx.device, module, null);
 
             // TODO: cache descriptor sets?
-            const desc_layout = try ctx.vkd.createDescriptorSetLayout(ctx.device, .{
+            const desc_layout = try ctx.vkd.createDescriptorSetLayout(ctx.device, &.{
                 .flags = .{},
                 .binding_count = @intCast(u32, param_info.desc_layout_bindings.len),
                 .p_bindings = param_info.desc_layout_bindings.ptr,
             }, null);
             errdefer ctx.vkd.destroyDescriptorSetLayout(ctx.device, desc_layout, null);
 
-            const pipeline_layout = try ctx.vkd.createPipelineLayout(ctx.device, .{
+            const pipeline_layout = try ctx.vkd.createPipelineLayout(ctx.device, &.{
                 .flags = .{},
                 .set_layout_count = 1,
                 .p_set_layouts = &[_]vk.DescriptorSetLayout{desc_layout},
@@ -315,7 +315,7 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
             );
             errdefer ctx.vkd.destroyPipeline(ctx.device, pipeline[0], null);
 
-            const cmd_pool = try ctx.vkd.createCommandPool(ctx.device, .{
+            const cmd_pool = try ctx.vkd.createCommandPool(ctx.device, &.{
                 .flags = .{
                     .transient_bit = true,
                     .reset_command_buffer_bit = true,
@@ -324,7 +324,7 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
             }, null);
             errdefer ctx.vkd.destroyCommandPool(ctx.device, cmd_pool, null);
 
-            const desc_pool = try ctx.vkd.createDescriptorPool(ctx.device, .{
+            const desc_pool = try ctx.vkd.createDescriptorPool(ctx.device, &.{
                 .flags = .{},
                 .max_sets = 2,
                 .pool_size_count = param_info.desc_pool_sizes.len,
@@ -332,7 +332,7 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
             }, null);
             errdefer ctx.vkd.destroyDescriptorPool(ctx.device, desc_pool, null);
 
-            const desc_template = try ctx.vkd.createDescriptorUpdateTemplate(ctx.device, .{
+            const desc_template = try ctx.vkd.createDescriptorUpdateTemplate(ctx.device, &.{
                 .flags = .{},
                 .descriptor_update_entry_count = param_info.desc_template_entries.len,
                 .p_descriptor_update_entries = param_info.desc_template_entries.ptr,
@@ -345,20 +345,20 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
             }, null);
             errdefer ctx.vkd.destroyDescriptorUpdateTemplate(ctx.device, desc_template, null);
 
-            const fence = try ctx.vkd.createFence(ctx.device, .{
+            const fence = try ctx.vkd.createFence(ctx.device, &.{
                 .flags = .{ .signaled_bit = true },
             }, null);
             errdefer ctx.vkd.destroyFence(ctx.device, fence, null);
 
             var cmd_bufs: [2]vk.CommandBuffer = undefined;
-            try ctx.vkd.allocateCommandBuffers(ctx.device, .{
+            try ctx.vkd.allocateCommandBuffers(ctx.device, &.{
                 .command_pool = cmd_pool,
                 .level = .primary,
                 .command_buffer_count = 2,
             }, &cmd_bufs);
 
             var desc_sets: [2]vk.DescriptorSet = undefined;
-            try ctx.vkd.allocateDescriptorSets(ctx.device, .{
+            try ctx.vkd.allocateDescriptorSets(ctx.device, &.{
                 .descriptor_pool = desc_pool,
                 .descriptor_set_count = 2,
                 .p_set_layouts = &[2]vk.DescriptorSetLayout{
@@ -461,12 +461,12 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
                 self.ctx.device,
                 desc_set,
                 self.desc_template,
-                @ptrCast(*const c_void, &descriptors),
+                @ptrCast(*const anyopaque, &descriptors),
             );
 
             // Record command buffer
             const cmd_buf = self.cmd_bufs[self.idx];
-            try self.ctx.vkd.beginCommandBuffer(cmd_buf, .{
+            try self.ctx.vkd.beginCommandBuffer(cmd_buf, &.{
                 .flags = .{ .one_time_submit_bit = true },
                 .p_inheritance_info = null,
             });
@@ -493,7 +493,7 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
                     range.stage_flags,
                     range.offset,
                     range.size,
-                    @ptrCast(*const c_void, &push_data),
+                    @ptrCast(*const anyopaque, &push_data),
                 );
             }
 
@@ -746,7 +746,7 @@ pub fn Buffer(comptime T: type) type {
         pub const is_zcompute_buffer_wrapper = void;
 
         pub fn init(ctx: *Context, len: u64, flags: BufferInitFlags) !Self {
-            const buf = try ctx.vkd.createBuffer(ctx.device, .{
+            const buf = try ctx.vkd.createBuffer(ctx.device, &vk.BufferCreateInfo{
                 .flags = .{},
                 .size = len * @sizeOf(T),
                 .usage = .{
@@ -814,63 +814,63 @@ fn isBufferWrapper(comptime T: type) bool {
         @hasDecl(T, "is_zcompute_buffer_wrapper");
 }
 
-const BaseDispatch = vk.BaseWrapper(.{
-    .CreateInstance,
-    .EnumerateInstanceLayerProperties,
-    .GetInstanceProcAddr,
+const BaseDispatch = vk.BaseWrapper(&.{
+    .createInstance,
+    .enumerateInstanceLayerProperties,
+    .getInstanceProcAddr,
 });
 
-const InstanceDispatch = vk.InstanceWrapper(.{
-    .CreateDevice,
-    .DestroyInstance,
-    .EnumerateDeviceExtensionProperties,
-    .EnumeratePhysicalDevices,
-    .GetDeviceProcAddr,
-    .GetPhysicalDeviceFeatures,
-    .GetPhysicalDeviceMemoryProperties,
-    .GetPhysicalDeviceProperties,
-    .GetPhysicalDeviceQueueFamilyProperties,
+const InstanceDispatch = vk.InstanceWrapper(&.{
+    .createDevice,
+    .destroyInstance,
+    .enumerateDeviceExtensionProperties,
+    .enumeratePhysicalDevices,
+    .getDeviceProcAddr,
+    .getPhysicalDeviceFeatures,
+    .getPhysicalDeviceMemoryProperties,
+    .getPhysicalDeviceProperties,
+    .getPhysicalDeviceQueueFamilyProperties,
 });
 
-const DeviceDispatch = vk.DeviceWrapper(.{
-    .AllocateCommandBuffers,
-    .AllocateDescriptorSets,
-    .AllocateMemory,
-    .BeginCommandBuffer,
-    .BindBufferMemory,
-    .CmdBindDescriptorSets,
-    .CmdBindPipeline,
-    .CmdDispatchBase,
-    .CmdPushConstants,
-    .CreateBuffer,
-    .CreateCommandPool,
-    .CreateComputePipelines,
-    .CreateDescriptorPool,
-    .CreateDescriptorSetLayout,
-    .CreateDescriptorUpdateTemplate,
-    .CreateFence,
-    .CreatePipelineLayout,
-    .CreateShaderModule,
-    .DestroyBuffer,
-    .DestroyCommandPool,
-    .DestroyDescriptorPool,
-    .DestroyDescriptorSetLayout,
-    .DestroyDescriptorUpdateTemplate,
-    .DestroyDevice,
-    .DestroyFence,
-    .DestroyPipeline,
-    .DestroyPipelineLayout,
-    .DestroyShaderModule,
-    .EndCommandBuffer,
-    .FreeMemory,
-    .GetBufferMemoryRequirements,
-    .GetDeviceQueue,
-    .MapMemory,
-    .QueueSubmit,
-    .ResetFences,
-    .UnmapMemory,
-    .UpdateDescriptorSetWithTemplate,
-    .WaitForFences,
+const DeviceDispatch = vk.DeviceWrapper(&.{
+    .allocateCommandBuffers,
+    .allocateDescriptorSets,
+    .allocateMemory,
+    .beginCommandBuffer,
+    .bindBufferMemory,
+    .cmdBindDescriptorSets,
+    .cmdBindPipeline,
+    .cmdDispatchBase,
+    .cmdPushConstants,
+    .createBuffer,
+    .createCommandPool,
+    .createComputePipelines,
+    .createDescriptorPool,
+    .createDescriptorSetLayout,
+    .createDescriptorUpdateTemplate,
+    .createFence,
+    .createPipelineLayout,
+    .createShaderModule,
+    .destroyBuffer,
+    .destroyCommandPool,
+    .destroyDescriptorPool,
+    .destroyDescriptorSetLayout,
+    .destroyDescriptorUpdateTemplate,
+    .destroyDevice,
+    .destroyFence,
+    .destroyPipeline,
+    .destroyPipelineLayout,
+    .destroyShaderModule,
+    .endCommandBuffer,
+    .freeMemory,
+    .getBufferMemoryRequirements,
+    .getDeviceQueue,
+    .mapMemory,
+    .queueSubmit,
+    .resetFences,
+    .unmapMemory,
+    .updateDescriptorSetWithTemplate,
+    .waitForFences,
 });
 
 // Simple loader for base Vulkan functions
