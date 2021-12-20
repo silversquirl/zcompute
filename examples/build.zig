@@ -6,7 +6,7 @@ pub fn build(b: *std.build.Builder) void {
     example(b, target, mode, "collatz");
 }
 
-fn example(b: *std.build.Builder, target: std.build.Target, mode: std.builtin.Mode, name: []const u8) void {
+fn example(b: *std.build.Builder, target: std.zig.CrossTarget, mode: std.builtin.Mode, name: []const u8) void {
     const exe = b.addExecutable(name, b.fmt("{s}/main.zig", .{name}));
     exe.addPackagePath("zcompute", "../src/zcompute.zig");
     exe.linkage = .dynamic;

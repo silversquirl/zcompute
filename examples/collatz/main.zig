@@ -9,8 +9,8 @@ pub fn main() !void {
         // If we let GPA record stack traces, it can cause segfaults from within Vulkan
         .stack_trace_frames = 0,
     }){};
-    defer _ = gpa.deinit();
-    const allocator = &gpa.allocator;
+    errdefer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
     // Create a new zcompute context
     // This sets up a link to the GPU, and is required for all usage of the library
@@ -21,7 +21,7 @@ pub fn main() !void {
     var shad = try zc.Shader(&.{
         zc.pushConstant("histogram_len", 0, u32), // This is a push constant
         zc.storageBuffer("histogram", 0, zc.Buffer(u32)), // This is a storage buffer
-    }).initBytes(&ctx, @embedFile("collatz.spv"));
+    }).initBytes(allocator, &ctx, @embedFile("collatz.spv"));
     defer shad.deinit();
 
     // Allocate a buffer for histogram data

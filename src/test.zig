@@ -3,18 +3,13 @@
 const std = @import("std");
 const zc = @import("zcompute.zig");
 
-var allocator_instance = std.heap.GeneralPurposeAllocator(.{
-    .stack_trace_frames = 0, // Vulkan does some weird shit
-}){};
-const allocator = &allocator_instance.allocator;
-
 test "initialization" {
-    var ctx = try zc.Context.init(allocator, .{});
+    var ctx = try zc.Context.init(std.testing.allocator, .{});
     ctx.deinit();
 }
 
 test "buffer mapping" {
-    var ctx = try zc.Context.init(allocator, .{});
+    var ctx = try zc.Context.init(std.testing.allocator, .{});
     defer ctx.deinit();
 
     const buf = try zc.Buffer([2]f32).init(&ctx, 6, .{ .map = true, .uniform = true });
@@ -48,7 +43,7 @@ test "buffer mapping" {
 }
 
 test "compute shader" {
-    var ctx = try zc.Context.init(allocator, .{});
+    var ctx = try zc.Context.init(std.testing.allocator, .{});
     defer ctx.deinit();
 
     const count = 16;
@@ -79,7 +74,7 @@ test "compute shader" {
         zc.storageBuffer("in", 1, zc.Buffer(f32)),
         zc.storageBuffer("out", 2, zc.Buffer(f32)),
     });
-    var shad = try Shader.initBytes(&ctx, @embedFile("test/copy.spv"));
+    var shad = try Shader.initBytes(std.testing.allocator, &ctx, @embedFile("test/copy.spv"));
     defer shad.deinit();
 
     try shad.exec(0, .{ .x = count }, .{
@@ -99,7 +94,7 @@ test "compute shader" {
 }
 
 test "push constants" {
-    var ctx = try zc.Context.init(allocator, .{});
+    var ctx = try zc.Context.init(std.testing.allocator, .{});
     defer ctx.deinit();
 
     const count = 16;
@@ -111,7 +106,7 @@ test "push constants" {
         zc.pushConstant("data", 0, [4]f32),
         zc.storageBuffer("out", 0, zc.Buffer([4]f32)),
     });
-    var shad = try Shader.initBytes(&ctx, @embedFile("test/push-constants.spv"));
+    var shad = try Shader.initBytes(std.testing.allocator, &ctx, @embedFile("test/push-constants.spv"));
     defer shad.deinit();
 
     try shad.exec(0, .{ .x = count }, .{
