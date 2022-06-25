@@ -38,7 +38,7 @@ pub fn main() !void {
         const max_batch = ctx.compute_dispatch_limits[0]; // Maximum size of one batch
         std.debug.print("Computing collatz stopping time histogram for values up to {}, at batch size {}\n", .{ max_n, max_batch });
 
-        const node = try progress.start("Executing batches...", (max_n - 1) / max_batch + 1);
+        const node = progress.start("Executing batches...", (max_n - 1) / max_batch + 1);
         defer node.end();
 
         var n: u32 = 0;
@@ -56,7 +56,7 @@ pub fn main() !void {
             node.completeOne();
         }
     }
-    std.debug.print("Done in {}\n", .{std.fmt.fmtDuration(progress.timer.read())});
+    std.debug.print("Done in {}\n", .{std.fmt.fmtDuration(progress.timer.?.read())});
 
     // Wait for the last shader to finish
     // Shader execution happens asynchronously, so if we want to read back the data we need to synchronize
