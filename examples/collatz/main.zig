@@ -43,7 +43,7 @@ pub fn main() !void {
 
         var n: u32 = 0;
         while (n < max_n) : (n += max_batch) {
-            const batch = @minimum(max_n - n, max_batch);
+            const batch = @min(max_n - n, max_batch);
             try shad.exec(null, .{
                 // This struct defines the dimensions of the compute dispatch
                 .x = batch,

@@ -73,7 +73,7 @@ pub const Context = struct {
                 .p_application_name = app_name,
                 .application_version = app_version,
                 .p_engine_name = "zcompute",
-                .engine_version = 00_01_00,
+                .engine_version = 0 << 20 | 1 << 10 | 0,
                 .api_version = vk.makeApiVersion(0, 1, 1, 0),
             },
             .enabled_layer_count = @intCast(u32, layers.len),
@@ -392,10 +392,10 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
 
             // Detect endianness
             const magic = std.mem.readIntSliceLittle(u32, code);
-            const spirv_magic = 0x07230203;
+            const spirv_magic: u32 = 0x07230203;
             const endian: std.builtin.Endian = switch (magic) {
                 spirv_magic => .Little,
-                @byteSwap(u32, spirv_magic) => .Big,
+                @byteSwap(spirv_magic) => .Big,
                 else => return error.InvalidShader,
             };
 
@@ -604,7 +604,7 @@ const ShaderParamInfo = struct {
 
     fn init(comptime params: []const ShaderParameter) ShaderParamInfo {
         var kind_counts = std.EnumArray(ShaderParameterKind, u32).initDefault(0, .{});
-        var fields: [params.len]std.builtin.TypeInfo.StructField = undefined;
+        var fields: [params.len]std.builtin.Type.StructField = undefined;
 
         var push_constant_names: [params.len][]const u8 = undefined;
         var push_constant_ranges: [params.len]vk.PushConstantRange = undefined;
@@ -618,7 +618,7 @@ const ShaderParamInfo = struct {
         for (params) |param, i| {
             fields[i] = .{
                 .name = param.name,
-                .field_type = param.data_type,
+                .type = param.data_type,
                 .default_value = null,
                 .is_comptime = false,
                 .alignment = @alignOf(param.data_type),
@@ -810,7 +810,7 @@ pub const BufferInitFlags = packed struct {
 fn isBufferWrapper(comptime T: type) bool {
     return @typeInfo(T) == .Struct and
         @hasField(T, "buf") and
-        std.meta.fieldInfo(T, .buf).field_type == vk.Buffer and
+        std.meta.fieldInfo(T, .buf).type == vk.Buffer and
         @hasDecl(T, "is_zcompute_buffer_wrapper");
 }
 
