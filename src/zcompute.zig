@@ -298,7 +298,7 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
                 .null_handle, // TODO: pipeline caching?
                 1,
                 &[_]vk.ComputePipelineCreateInfo{.{
-                    .flags = .{},
+                    .flags = .{ .dispatch_base_bit = true },
                     .stage = .{
                         .flags = .{},
                         .stage = .{ .compute_bit = true },
