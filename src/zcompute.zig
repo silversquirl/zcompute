@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-pub const vk = @import("vk.zig");
+pub const vk = @import("vk");
 const log = std.log.scoped(.zcompute);
 
 pub const VkDeviceFeatures = vk.PhysicalDeviceFeatures;
@@ -67,7 +67,7 @@ pub const Context = struct {
         const layers = try self.instanceLayers(allocator);
         defer allocator.free(layers);
 
-        self.instance = try self.vkb.createInstance(&.{
+        self.instance = try self.vkb.createInstance(&vk.InstanceCreateInfo{
             .flags = .{},
             .p_application_info = &.{
                 .p_application_name = app_name,
@@ -76,7 +76,7 @@ pub const Context = struct {
                 .engine_version = 0 << 20 | 1 << 10 | 0,
                 .api_version = vk.makeApiVersion(0, 1, 1, 0),
             },
-            .enabled_layer_count = @intCast(u32, layers.len),
+            .enabled_layer_count = @intCast(layers.len),
             .pp_enabled_layer_names = layers.ptr,
             .enabled_extension_count = 0,
             .pp_enabled_extension_names = undefined,
@@ -167,9 +167,9 @@ pub const Context = struct {
             defer allocator.free(queues);
             self.vki.getPhysicalDeviceQueueFamilyProperties(dev, &n_queues, queues.ptr);
 
-            self.queue_family = for (queues[0..n_queues]) |queue, i| {
+            self.queue_family = for (queues[0..n_queues], 0..) |queue, i| {
                 if (queue.queue_flags.compute_bit) {
-                    break @intCast(u32, i);
+                    break @intCast(i);
                 }
             } else {
                 continue;
@@ -194,13 +194,13 @@ pub const Context = struct {
             },
         };
 
-        self.device = try self.vki.createDevice(self.phys_device, &.{
+        self.device = try self.vki.createDevice(self.phys_device, &vk.DeviceCreateInfo{
             .flags = .{},
             .queue_create_info_count = queue_infos.len,
             .p_queue_create_infos = &queue_infos,
             .enabled_layer_count = 0,
             .pp_enabled_layer_names = undefined,
-            .enabled_extension_count = @intCast(u32, opts.vulkan_device_extensions.len),
+            .enabled_extension_count = @intCast(opts.vulkan_device_extensions.len),
             .pp_enabled_extension_names = opts.vulkan_device_extensions.ptr,
             .p_enabled_features = &opts.vulkan_device_features,
         }, null);
@@ -239,7 +239,7 @@ pub const Context = struct {
             if (mem_type.property_flags.contains(flags) and
                 size <= mems.memory_heaps[mem_type.heap_index].size)
             {
-                return @intCast(u32, mem_type_idx);
+                return @intCast(mem_type_idx);
             }
         }
         return null;
@@ -276,9 +276,9 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
             defer ctx.vkd.destroyShaderModule(ctx.device, module, null);
 
             // TODO: cache descriptor sets?
-            const desc_layout = try ctx.vkd.createDescriptorSetLayout(ctx.device, &.{
+            const desc_layout = try ctx.vkd.createDescriptorSetLayout(ctx.device, &vk.DescriptorSetLayoutCreateInfo{
                 .flags = .{},
-                .binding_count = @intCast(u32, param_info.desc_layout_bindings.len),
+                .binding_count = @intCast(param_info.desc_layout_bindings.len),
                 .p_bindings = param_info.desc_layout_bindings.ptr,
             }, null);
             errdefer ctx.vkd.destroyDescriptorSetLayout(ctx.device, desc_layout, null);
@@ -402,7 +402,7 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
             // Read SPIR-V
             const code32 = try allocator.alloc(u32, @divExact(code.len, 4));
             defer allocator.free(code32);
-            for (code32) |*v, i| {
+            for (code32, 0..) |*v, i| {
                 v.* = std.mem.readIntSlice(u32, code[i * 4 ..], endian);
             }
 
@@ -450,7 +450,7 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
             const desc_set = self.desc_sets[self.idx];
 
             var descriptors: [param_info.desc_binding_names.len]vk.DescriptorBufferInfo = undefined;
-            inline for (param_info.desc_binding_names) |name, i| {
+            inline for (param_info.desc_binding_names, 0..) |name, i| {
                 descriptors[i] = .{
                     .buffer = @field(param_data, name).buf,
                     .offset = 0,
@@ -461,7 +461,7 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
                 self.ctx.device,
                 desc_set,
                 self.desc_template,
-                @ptrCast(*const anyopaque, &descriptors),
+                @ptrCast(&descriptors),
             );
 
             // Record command buffer
@@ -482,7 +482,7 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
             );
 
             // Send push constants
-            inline for (param_info.push_constant_names) |name, i| {
+            inline for (param_info.push_constant_names, 0..) |name, i| {
                 const push_data = @field(param_data, name);
                 const range = param_info.push_constant_ranges[i];
                 comptime std.debug.assert(range.size == @sizeOf(@TypeOf(push_data)));
@@ -493,7 +493,7 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
                     range.stage_flags,
                     range.offset,
                     range.size,
-                    @ptrCast(*const anyopaque, &push_data),
+                    @ptrCast(&push_data),
                 );
             }
 
@@ -615,7 +615,7 @@ const ShaderParamInfo = struct {
         var desc_template_entries: [params.len]vk.DescriptorUpdateTemplateEntry = undefined;
         var desc_i = 0;
 
-        for (params) |param, i| {
+        for (params, 0..) |param, i| {
             fields[i] = .{
                 .name = param.name,
                 .type = param.data_type,
@@ -792,8 +792,8 @@ pub fn Buffer(comptime T: type) type {
                 self.len * @sizeOf(T),
                 .{},
             );
-            const ptr_aligned = @alignCast(min_map_align, ptr);
-            return @ptrCast([*]align(min_map_align) T, ptr_aligned)[0..self.len];
+            const ptr_typed: [*]align(min_map_align) T = @alignCast(@ptrCast(ptr));
+            return ptr_typed[0..self.len];
         }
         pub fn unmap(self: Self) void {
             self.ctx.vkd.unmapMemory(self.ctx.device, self.mem);

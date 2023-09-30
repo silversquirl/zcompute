@@ -53,8 +53,8 @@ test "compute shader" {
     {
         const data = try in.map();
         defer in.unmap();
-        for (data) |*v, i| {
-            v.* = @intToFloat(f32, i);
+        for (data, 0..) |*v, i| {
+            v.* = @floatFromInt(i);
         }
     }
 
@@ -87,8 +87,8 @@ test "compute shader" {
     {
         const data = try out.map();
         defer out.unmap();
-        for (data) |v, i| {
-            try std.testing.expectEqual(@intToFloat(f32, i), v);
+        for (data, 0..) |v, i| {
+            try std.testing.expectEqual(@as(f32, @floatFromInt(i)), v);
         }
     }
 }
