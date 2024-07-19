@@ -6,16 +6,18 @@ pub fn build(b: *std.Build) void {
     }).module("vulkan-zig");
 
     _ = b.addModule("zcompute", .{
-        .source_file = .{ .path = "src/zcompute.zig" },
-        .dependencies = &.{
+        .root_source_file = b.path("src/zcompute.zig"),
+        .imports = &.{
             .{ .name = "vk", .module = vk },
         },
     });
 
-    const test_step = b.addTest(.{
-        .root_source_file = .{ .path = "src/test.zig" },
+    const test_exe = b.addTest(.{
+        .root_source_file = b.path("src/test.zig"),
     });
-    test_step.addModule("vk", vk);
-    test_step.linkLibC();
-    b.step("test", "Run library tests").dependOn(&test_step.step);
+    test_exe.root_module.addImport("vk", vk);
+    test_exe.linkLibC();
+
+    const run_test = b.addRunArtifact(test_exe);
+    b.step("test", "Run library tests").dependOn(&run_test.step);
 }

@@ -4,6 +4,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 pub const vk = @import("vk");
 const log = std.log.scoped(.zcompute);
+const root = @import("root");
 
 pub const VkDeviceFeatures = vk.PhysicalDeviceFeatures;
 
@@ -62,8 +63,8 @@ pub const Context = struct {
     }
 
     fn initInstance(self: *Context, allocator: std.mem.Allocator) !void {
-        const app_name = std.meta.globalOption("zcompute_app_name", [*:0]const u8);
-        const app_version = std.meta.globalOption("zcompute_app_version", u32) orelse 0;
+        const app_name: ?[*:0]const u8 = if (@hasDecl(root, "zcompute_app_name")) root.zcompute_app_name else null;
+        const app_version: u32 = if (@hasDecl(root, "zcompute_app_version")) root.zcompute_app_version else 0;
         const layers = try self.instanceLayers(allocator);
         defer allocator.free(layers);
 
@@ -89,12 +90,10 @@ pub const Context = struct {
             return &.{};
         }
 
-        const wanted_layers = comptime std.meta.globalOption(
-            "zcompute_debug_layers",
-            []const [:0]const u8,
-        ) orelse &[_][:0]const u8{
-            "VK_LAYER_KHRONOS_validation",
-        };
+        const wanted_layers: []const [:0]const u8 = if (@hasDecl(root, "zcompute_debug_layers"))
+            root.zcompute_debug_layers
+        else
+            &.{"VK_LAYER_KHRONOS_validation"};
 
         var n_supported_layers: u32 = undefined;
         _ = try self.vkb.enumerateInstanceLayerProperties(&n_supported_layers, null);
@@ -391,11 +390,11 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
             }
 
             // Detect endianness
-            const magic = std.mem.readIntSliceLittle(u32, code);
+            const magic = std.mem.readInt(u32, code[0..4], .little);
             const spirv_magic: u32 = 0x07230203;
             const endian: std.builtin.Endian = switch (magic) {
-                spirv_magic => .Little,
-                @byteSwap(spirv_magic) => .Big,
+                spirv_magic => .little,
+                @byteSwap(spirv_magic) => .big,
                 else => return error.InvalidShader,
             };
 
@@ -403,7 +402,7 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
             const code32 = try allocator.alloc(u32, @divExact(code.len, 4));
             defer allocator.free(code32);
             for (code32, 0..) |*v, i| {
-                v.* = std.mem.readIntSlice(u32, code[i * 4 ..], endian);
+                v.* = std.mem.readInt(u32, code[i * 4 ..][0..4], endian);
             }
 
             // Init shader
@@ -546,7 +545,7 @@ pub const ComputeDispatch = struct {
     baseZ: u32 = 0,
 };
 
-pub fn uniformBuffer(comptime name: []const u8, comptime binding: u32, comptime data_type: type) ShaderParameter {
+pub fn uniformBuffer(comptime name: [:0]const u8, comptime binding: u32, comptime data_type: type) ShaderParameter {
     return .{
         .name = name,
         .idx = binding,
@@ -554,7 +553,7 @@ pub fn uniformBuffer(comptime name: []const u8, comptime binding: u32, comptime 
         .data_type = data_type,
     };
 }
-pub fn storageBuffer(comptime name: []const u8, comptime binding: u32, comptime data_type: type) ShaderParameter {
+pub fn storageBuffer(comptime name: [:0]const u8, comptime binding: u32, comptime data_type: type) ShaderParameter {
     return .{
         .name = name,
         .idx = binding,
@@ -562,7 +561,7 @@ pub fn storageBuffer(comptime name: []const u8, comptime binding: u32, comptime 
         .data_type = data_type,
     };
 }
-pub fn pushConstant(comptime name: []const u8, comptime offset: u32, comptime data_type: type) ShaderParameter {
+pub fn pushConstant(comptime name: [:0]const u8, comptime offset: u32, comptime data_type: type) ShaderParameter {
     return .{
         .name = name,
         .idx = offset,
@@ -572,7 +571,7 @@ pub fn pushConstant(comptime name: []const u8, comptime offset: u32, comptime da
 }
 
 pub const ShaderParameter = struct {
-    name: []const u8,
+    name: [:0]const u8,
     idx: u32, // Binding index for storage and uniform, offset for push_constant
     kind: ShaderParameterKind,
     data_type: type,
@@ -626,10 +625,10 @@ const ShaderParamInfo = struct {
 
             if (param.kind == .push_constant) {
                 switch (@typeInfo(param.data_type)) {
-                    .Struct => |info| if (info.layout == .Auto) {
+                    .Struct => |info| if (info.layout == .auto) {
                         @compileError("Push constant data should have defined layout. Use an extern struct (or a packed struct if you know what you're doing)");
                     },
-                    .Union => |info| if (info.layout == .Auto) {
+                    .Union => |info| if (info.layout == .auto) {
                         @compileError("Push constant data should have defined layout. Unions are a bad idea anyway, but if you must, use an extern or packed union");
                     },
                     // TODO: there's a lot more checking we could do here but I'm lazy
@@ -692,34 +691,34 @@ const ShaderParamInfo = struct {
 
         // We copy the arrays in order to remove unused elements from the binary
         return .{
-            .push_constant_names = comptimeDupe(
+            .push_constant_names = constSlice(
                 []const u8,
                 push_constant_names[0..push_constant_i],
             ),
-            .push_constant_ranges = comptimeDupe(
+            .push_constant_ranges = constSlice(
                 vk.PushConstantRange,
                 push_constant_ranges[0..push_constant_i],
             ),
 
-            .desc_binding_names = comptimeDupe(
+            .desc_binding_names = constSlice(
                 []const u8,
                 desc_binding_names[0..desc_i],
             ),
-            .desc_layout_bindings = comptimeDupe(
+            .desc_layout_bindings = constSlice(
                 vk.DescriptorSetLayoutBinding,
                 desc_layout_bindings[0..desc_i],
             ),
-            .desc_template_entries = comptimeDupe(
+            .desc_template_entries = constSlice(
                 vk.DescriptorUpdateTemplateEntry,
                 desc_template_entries[0..desc_i],
             ),
-            .desc_pool_sizes = comptimeDupe(
+            .desc_pool_sizes = constSlice(
                 vk.DescriptorPoolSize,
                 pool_sizes[0..pool_i],
             ),
 
             .params_type = @Type(.{ .Struct = .{
-                .layout = .Auto,
+                .layout = .auto,
                 .fields = &fields,
                 .decls = &.{},
                 .is_tuple = false,
@@ -727,11 +726,12 @@ const ShaderParamInfo = struct {
         };
     }
 };
-// TODO(compiler bug): replace this with x**1
-fn comptimeDupe(comptime T: type, comptime x: []const T) []const T {
-    var y: [x.len]T = undefined;
-    std.mem.copy(T, &y, x);
-    return &y;
+
+/// Given a comptime-known slice, stores the data in a `const` and returns a
+/// pointer to it, hence giving a slice which is available at runtime.
+fn constSlice(comptime T: type, comptime x: []const T) []const T {
+    const final: [x.len]T = x[0..].*;
+    return &final;
 }
 
 pub fn Buffer(comptime T: type) type {
@@ -814,64 +814,68 @@ fn isBufferWrapper(comptime T: type) bool {
         @hasDecl(T, "is_zcompute_buffer_wrapper");
 }
 
-const BaseDispatch = vk.BaseWrapper(.{
-    .createInstance = true,
-    .enumerateInstanceLayerProperties = true,
-    .getInstanceProcAddr = true,
-});
+const need_api: vk.ApiInfo = .{
+    .base_commands = .{
+        .createInstance = true,
+        .enumerateInstanceLayerProperties = true,
+        .getInstanceProcAddr = true,
+    },
+    .instance_commands = .{
+        .createDevice = true,
+        .destroyInstance = true,
+        .enumerateDeviceExtensionProperties = true,
+        .enumeratePhysicalDevices = true,
+        .getDeviceProcAddr = true,
+        .getPhysicalDeviceFeatures = true,
+        .getPhysicalDeviceMemoryProperties = true,
+        .getPhysicalDeviceProperties = true,
+        .getPhysicalDeviceQueueFamilyProperties = true,
+    },
+    .device_commands = .{
+        .allocateCommandBuffers = true,
+        .allocateDescriptorSets = true,
+        .allocateMemory = true,
+        .beginCommandBuffer = true,
+        .bindBufferMemory = true,
+        .cmdBindDescriptorSets = true,
+        .cmdBindPipeline = true,
+        .cmdDispatchBase = true,
+        .cmdPushConstants = true,
+        .createBuffer = true,
+        .createCommandPool = true,
+        .createComputePipelines = true,
+        .createDescriptorPool = true,
+        .createDescriptorSetLayout = true,
+        .createDescriptorUpdateTemplate = true,
+        .createFence = true,
+        .createPipelineLayout = true,
+        .createShaderModule = true,
+        .destroyBuffer = true,
+        .destroyCommandPool = true,
+        .destroyDescriptorPool = true,
+        .destroyDescriptorSetLayout = true,
+        .destroyDescriptorUpdateTemplate = true,
+        .destroyDevice = true,
+        .destroyFence = true,
+        .destroyPipeline = true,
+        .destroyPipelineLayout = true,
+        .destroyShaderModule = true,
+        .endCommandBuffer = true,
+        .freeMemory = true,
+        .getBufferMemoryRequirements = true,
+        .getDeviceQueue = true,
+        .mapMemory = true,
+        .queueSubmit = true,
+        .resetFences = true,
+        .unmapMemory = true,
+        .updateDescriptorSetWithTemplate = true,
+        .waitForFences = true,
+    },
+};
 
-const InstanceDispatch = vk.InstanceWrapper(.{
-    .createDevice = true,
-    .destroyInstance = true,
-    .enumerateDeviceExtensionProperties = true,
-    .enumeratePhysicalDevices = true,
-    .getDeviceProcAddr = true,
-    .getPhysicalDeviceFeatures = true,
-    .getPhysicalDeviceMemoryProperties = true,
-    .getPhysicalDeviceProperties = true,
-    .getPhysicalDeviceQueueFamilyProperties = true,
-});
-
-const DeviceDispatch = vk.DeviceWrapper(.{
-    .allocateCommandBuffers = true,
-    .allocateDescriptorSets = true,
-    .allocateMemory = true,
-    .beginCommandBuffer = true,
-    .bindBufferMemory = true,
-    .cmdBindDescriptorSets = true,
-    .cmdBindPipeline = true,
-    .cmdDispatchBase = true,
-    .cmdPushConstants = true,
-    .createBuffer = true,
-    .createCommandPool = true,
-    .createComputePipelines = true,
-    .createDescriptorPool = true,
-    .createDescriptorSetLayout = true,
-    .createDescriptorUpdateTemplate = true,
-    .createFence = true,
-    .createPipelineLayout = true,
-    .createShaderModule = true,
-    .destroyBuffer = true,
-    .destroyCommandPool = true,
-    .destroyDescriptorPool = true,
-    .destroyDescriptorSetLayout = true,
-    .destroyDescriptorUpdateTemplate = true,
-    .destroyDevice = true,
-    .destroyFence = true,
-    .destroyPipeline = true,
-    .destroyPipelineLayout = true,
-    .destroyShaderModule = true,
-    .endCommandBuffer = true,
-    .freeMemory = true,
-    .getBufferMemoryRequirements = true,
-    .getDeviceQueue = true,
-    .mapMemory = true,
-    .queueSubmit = true,
-    .resetFences = true,
-    .unmapMemory = true,
-    .updateDescriptorSetWithTemplate = true,
-    .waitForFences = true,
-});
+const BaseDispatch = vk.BaseWrapper(&.{need_api});
+const InstanceDispatch = vk.InstanceWrapper(&.{need_api});
+const DeviceDispatch = vk.DeviceWrapper(&.{need_api});
 
 // Simple loader for base Vulkan functions
 threadlocal var loader = Loader{};
