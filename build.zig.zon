@@ -1,10 +1,17 @@
 .{
     .name = "zcompute",
     .version = "0.1.0-dev",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "update-vulkan.sh",
+        "vk.xml",
+    },
     .dependencies = .{
         .vulkan_zig = .{
-            .url = "https://github.com/Snektron/vulkan-zig/archive/1e4e90ffb14084357265d79b58e5f1b1c9396069.tar.gz",
-            .hash = "1220d3e1254af9c8fd4c3f09bd9f50f51dc5eaa5506f845ed67bcd75e1e2961ce1ea",
+            .url = "https://github.com/Snektron/vulkan-zig/archive/9f6e6177b1fdb3ed22231d9216a24480e84cfa5e.tar.gz",
+            .hash = "1220f2961df224f7d35dee774b26194b8b937cc252fa8e4023407776c58521d53e38",
         },
     },
 }
