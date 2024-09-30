@@ -265,8 +265,13 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
 
         const Self = @This();
 
-        // Creates a shader from an array of native-endian u32
+        // Creates a shader from an array of native-endian u32. The default entrypoint name is `main`
         pub fn init(ctx: *Context, code: []const u32) !Self {
+            return initNamed(ctx, code, "main");
+        }
+
+        // Creates a shader from an array of native-endian u32
+        pub fn initNamed(ctx: *Context, code: []const u32, entrypoint_name: [:0]const u8) !Self {
             const module = try ctx.vkd.createShaderModule(ctx.device, &.{
                 .flags = .{},
                 .code_size = 4 * code.len,
@@ -302,7 +307,7 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
                         .flags = .{},
                         .stage = .{ .compute_bit = true },
                         .module = module,
-                        .p_name = "main",
+                        .p_name = entrypoint_name.ptr,
                         .p_specialization_info = null,
                     },
                     .layout = pipeline_layout,
