@@ -169,7 +169,7 @@ pub const Context = struct {
             ctx.vki.getPhysicalDeviceQueueFamilyProperties(dev, &n_queues, queues.ptr);
 
             ctx.queue_family = for (queues[0..n_queues], 0..) |queue, i| {
-                if (queue.queue_flags.compute_bit) {
+                if (queue.queue_flags.compute_bit and queue.queue_flags.transfer_bit) {
                     break @intCast(i);
                 }
             } else {
@@ -361,6 +361,7 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
                 .level = .primary,
                 .command_buffer_count = 2,
             }, &cmd_bufs);
+            errdefer ctx.vkd.freeCommandBuffers(ctx.device, ctx.cmd_pool, 2, &cmd_bufs);
 
             var desc_sets: [2]vk.DescriptorSet = undefined;
             try ctx.vkd.allocateDescriptorSets(ctx.device, &.{
@@ -417,6 +418,7 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
         pub fn deinit(shad: Self) void {
             shad.ctx.vkd.destroyFence(shad.ctx.device, shad.fence, null);
             shad.ctx.vkd.destroyDescriptorUpdateTemplate(shad.ctx.device, shad.desc_template, null);
+            shad.ctx.vkd.freeCommandBuffers(shad.ctx.device, shad.ctx.cmd_pool, 2, &shad.cmd_bufs);
             shad.ctx.vkd.destroyDescriptorPool(shad.ctx.device, shad.desc_pool, null);
             shad.ctx.vkd.destroyPipeline(shad.ctx.device, shad.pipeline, null);
             shad.ctx.vkd.destroyPipelineLayout(shad.ctx.device, shad.pipeline_layout, null);
@@ -425,7 +427,7 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
 
         /// Waits indefinitely for the current execution to complete
         pub fn wait(shad: Self) !void {
-            while (!try shad.waitTimeout(~@as(u64, 0))) {}
+            while (!try shad.waitTimeout(std.math.maxInt(u64))) {}
         }
 
         /// Waits for the current execution to complete, returning true on completion.
@@ -525,12 +527,6 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
             try shad.ctx.vkd.queueSubmit(shad.ctx.queue, 1, &[1]vk.SubmitInfo{.{
                 .command_buffer_count = 1,
                 .p_command_buffers = &[1]vk.CommandBuffer{cmd_buf},
-
-                .wait_semaphore_count = 0,
-                .p_wait_semaphores = undefined,
-                .p_wait_dst_stage_mask = undefined,
-                .signal_semaphore_count = 0,
-                .p_signal_semaphores = undefined,
             }}, shad.fence);
 
             // Swap buffers
@@ -744,20 +740,19 @@ pub fn Buffer(comptime T: type) type {
         buf: vk.Buffer,
         mem: vk.DeviceMemory,
         flags: BufferInitFlags,
-        off: u64,
         len: u64,
+        mapped_off: u64 = undefined,
 
         const Self = @This();
         pub const is_zcompute_buffer_wrapper = void;
 
         pub fn init(ctx: *Context, len: u64, flags: BufferInitFlags) !Self {
-            const buf, const mem = try allocate(ctx, len, flags);
+            const buf, const mem = try allocate(ctx, len, flags, true);
             return .{
                 .ctx = ctx,
                 .buf = buf,
                 .mem = mem,
                 .flags = flags,
-                .off = 0,
                 .len = len,
             };
         }
@@ -768,17 +763,18 @@ pub fn Buffer(comptime T: type) type {
         }
 
         const min_map_align = 64; // Spec requires min_memory_map_alignment limit to be at least 64
-        pub fn map(buf: Self) ![]align(min_map_align) T {
+        pub fn map(buf: *Self) ![]align(min_map_align) T {
             return buf.mapRange(0, buf.len);
         }
-        pub fn mapRange(buf: Self, off: u64, len: u64) ![]align(min_map_align) T {
+        pub fn mapRange(buf: *Self, off: u64, len: u64) ![]align(min_map_align) T {
             const ptr = try buf.ctx.vkd.mapMemory(
                 buf.ctx.device,
                 buf.mem,
-                buf.off + off,
+                off,
                 len * @sizeOf(T),
                 .{},
             );
+            buf.mapped_off = off;
             const ptr_typed: [*]align(min_map_align) T = @alignCast(@ptrCast(ptr));
             return ptr_typed[0..buf.len];
         }
@@ -786,13 +782,94 @@ pub fn Buffer(comptime T: type) type {
             buf.ctx.vkd.unmapMemory(buf.ctx.device, buf.mem);
         }
 
-        fn allocate(ctx: *Context, len: u64, flags: BufferInitFlags) !struct { vk.Buffer, vk.DeviceMemory } {
+        /// Flush CPU-side changes to the GPU
+        pub fn flush(buf: Self) !void {
+            try buf.ctx.vkd.flushMappedMemoryRanges(buf.ctx.device, 1, &.{.{
+                .memory = buf.mem,
+                .offset = buf.mapped_off,
+                .size = vk.WHOLE_SIZE,
+            }});
+        }
+        /// Invalidate the CPU-side copy, fetching any changes from the GPU
+        pub fn invalidate(buf: Self) !void {
+            try buf.ctx.vkd.flushMappedMemoryRanges(buf.ctx.device, 1, &.{.{
+                .memory = buf.mem,
+                .offset = buf.mapped_off,
+                .size = vk.WHOLE_SIZE,
+            }});
+        }
+
+        pub fn grow(buf: *Self, new_len: u64) !void {
+            std.debug.assert(new_len > buf.len);
+            const new_buf, const new_mem = try allocate(buf.ctx, new_len, buf.flags, false);
+            errdefer {
+                buf.ctx.free(new_mem);
+                buf.ctx.vkd.destroyBuffer(buf.ctx.device, new_buf, null);
+            }
+
+            // Allocate command buffer and fence
+            var cmd_buf: vk.CommandBuffer = undefined;
+            try buf.ctx.vkd.allocateCommandBuffers(buf.ctx.device, &.{
+                .command_pool = buf.ctx.cmd_pool,
+                .level = .primary,
+                .command_buffer_count = 1,
+            }, @as(*[1]vk.CommandBuffer, &cmd_buf));
+            defer buf.ctx.vkd.freeCommandBuffers(
+                buf.ctx.device,
+                buf.ctx.cmd_pool,
+                1,
+                @as(*[1]vk.CommandBuffer, &cmd_buf),
+            );
+
+            const fence = try buf.ctx.vkd.createFence(buf.ctx.device, &.{
+                .flags = .{},
+            }, null);
+            defer buf.ctx.vkd.destroyFence(buf.ctx.device, fence, null);
+
+            // Encode buffer copy command
+            try buf.ctx.vkd.beginCommandBuffer(cmd_buf, &.{
+                .flags = .{ .one_time_submit_bit = true },
+                .p_inheritance_info = null,
+            });
+            buf.ctx.vkd.cmdCopyBuffer(cmd_buf, buf.buf, new_buf, 1, &[1]vk.BufferCopy{.{
+                .src_offset = 0,
+                .dst_offset = 0,
+                .size = buf.len * @sizeOf(T),
+            }});
+            try buf.ctx.vkd.endCommandBuffer(cmd_buf);
+
+            // Submit copy command
+            try buf.ctx.vkd.queueSubmit(buf.ctx.queue, 1, &[1]vk.SubmitInfo{.{
+                .command_buffer_count = 1,
+                .p_command_buffers = &[1]vk.CommandBuffer{cmd_buf},
+            }}, fence);
+
+            // Wait
+            while (try buf.ctx.vkd.waitForFences(
+                buf.ctx.device,
+                1,
+                &[1]vk.Fence{fence},
+                vk.TRUE,
+                std.math.maxInt(u64),
+            ) != .success) {}
+
+            buf.ctx.free(buf.mem);
+            buf.ctx.vkd.destroyBuffer(buf.ctx.device, buf.buf, null);
+
+            buf.mem = new_mem;
+            buf.buf = new_buf;
+            buf.len = new_len;
+        }
+
+        fn allocate(ctx: *Context, len: u64, flags: BufferInitFlags, first: bool) !struct { vk.Buffer, vk.DeviceMemory } {
             const buf = try ctx.vkd.createBuffer(ctx.device, &.{
                 .flags = .{},
                 .size = len * @sizeOf(T),
                 .usage = .{
                     .uniform_buffer_bit = flags.uniform,
                     .storage_buffer_bit = flags.storage,
+                    .transfer_src_bit = flags.grow,
+                    .transfer_dst_bit = !first and flags.grow,
                 },
                 .sharing_mode = .exclusive,
                 .queue_family_index_count = 1,
@@ -817,6 +894,8 @@ pub fn Buffer(comptime T: type) type {
 pub const BufferInitFlags = packed struct {
     coherent: bool = false,
     map: bool = false,
+
+    grow: bool = false,
 
     uniform: bool = false,
     storage: bool = false,
@@ -853,6 +932,7 @@ const need_api: vk.ApiInfo = .{
         .bindBufferMemory = true,
         .cmdBindDescriptorSets = true,
         .cmdBindPipeline = true,
+        .cmdCopyBuffer = true,
         .cmdDispatchBase = true,
         .cmdPushConstants = true,
         .createBuffer = true,
@@ -875,9 +955,12 @@ const need_api: vk.ApiInfo = .{
         .destroyPipelineLayout = true,
         .destroyShaderModule = true,
         .endCommandBuffer = true,
+        .flushMappedMemoryRanges = true,
+        .freeCommandBuffers = true,
         .freeMemory = true,
         .getBufferMemoryRequirements = true,
         .getDeviceQueue = true,
+        .invalidateMappedMemoryRanges = true,
         .mapMemory = true,
         .queueSubmit = true,
         .resetFences = true,

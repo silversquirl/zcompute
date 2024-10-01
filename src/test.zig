@@ -12,7 +12,7 @@ test "buffer mapping" {
     var ctx = try zc.Context.init(std.testing.allocator, .{});
     defer ctx.deinit();
 
-    const buf = try zc.Buffer([2]f32).init(&ctx, 6, .{ .map = true, .uniform = true });
+    var buf = try zc.Buffer([2]f32).init(&ctx, 6, .{ .map = true, .uniform = true });
     defer buf.deinit();
 
     {
@@ -42,13 +42,49 @@ test "buffer mapping" {
     }
 }
 
+test "buffer grow" {
+    var ctx = try zc.Context.init(std.testing.allocator, .{});
+    defer ctx.deinit();
+
+    var buf = try zc.Buffer([2]f32).init(&ctx, 6, .{ .map = true, .grow = true, .uniform = true });
+    defer buf.deinit();
+
+    {
+        const map = try buf.map();
+        defer buf.unmap();
+
+        map[0] = .{ 0, 1 };
+        map[1] = .{ 2, 3 };
+        map[2] = .{ 4, 5 };
+        map[3] = .{ 6, 7 };
+        map[4] = .{ 8, 9 };
+        map[5] = .{ 10, 11 };
+    }
+
+    try buf.grow(12);
+
+    {
+        const map = try buf.map();
+        defer buf.unmap();
+
+        try std.testing.expectEqualSlices([2]f32, &.{
+            .{ 0, 1 },
+            .{ 2, 3 },
+            .{ 4, 5 },
+            .{ 6, 7 },
+            .{ 8, 9 },
+            .{ 10, 11 },
+        }, map[0..6]);
+    }
+}
+
 test "compute shader" {
     var ctx = try zc.Context.init(std.testing.allocator, .{});
     defer ctx.deinit();
 
     const count = 16;
 
-    const in = try zc.Buffer(f32).init(&ctx, count, .{ .map = true, .storage = true });
+    var in = try zc.Buffer(f32).init(&ctx, count, .{ .map = true, .storage = true });
     defer in.deinit();
     {
         const data = try in.map();
@@ -58,10 +94,10 @@ test "compute shader" {
         }
     }
 
-    const out = try zc.Buffer(f32).init(&ctx, count, .{ .map = true, .storage = true });
+    var out = try zc.Buffer(f32).init(&ctx, count, .{ .map = true, .storage = true });
     defer out.deinit();
 
-    const count_buf = try zc.Buffer(u32).init(&ctx, 1, .{ .map = true, .uniform = true });
+    var count_buf = try zc.Buffer(u32).init(&ctx, 1, .{ .map = true, .uniform = true });
     defer count_buf.deinit();
     {
         const data = try count_buf.map();
@@ -99,7 +135,7 @@ test "push constants" {
 
     const count = 16;
 
-    const out = try zc.Buffer([4]f32).init(&ctx, count, .{ .map = true, .storage = true });
+    var out = try zc.Buffer([4]f32).init(&ctx, count, .{ .map = true, .storage = true });
     defer out.deinit();
 
     const Shader = zc.Shader(&.{
