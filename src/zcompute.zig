@@ -790,11 +790,14 @@ pub fn Buffer(comptime T: type) type {
 
         const min_map_align = 64; // Spec requires min_memory_map_alignment limit to be at least 64
         pub fn map(self: Self) ![]align(min_map_align) T {
+            return self.mapRange(0, self.len);
+        }
+        pub fn mapRange(self: Self, off: u64, len: u64) ![]align(min_map_align) T {
             const ptr = try self.ctx.vkd.mapMemory(
                 self.ctx.device,
                 self.mem,
-                self.off,
-                self.len * @sizeOf(T),
+                self.off + off,
+                len * @sizeOf(T),
                 .{},
             );
             const ptr_typed: [*]align(min_map_align) T = @alignCast(@ptrCast(ptr));
