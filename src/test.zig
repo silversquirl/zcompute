@@ -8,7 +8,7 @@ test "initialization" {
     ctx.deinit();
 }
 
-test "buffer mapping" {
+test "buffer map" {
     var ctx = try zc.Context.init(std.testing.allocator, .{});
     defer ctx.deinit();
 
@@ -40,6 +40,28 @@ test "buffer mapping" {
             .{ 10, 11 },
         }, map);
     }
+}
+
+test "buffer fill" {
+    var ctx = try zc.Context.init(std.testing.allocator, .{});
+    defer ctx.deinit();
+
+    var buf = try zc.Buffer(u32).init(&ctx, 6, .{ .map = true, .coherent = true, .fill = true, .uniform = true });
+    defer buf.deinit();
+
+    const map = try buf.map();
+    defer buf.unmap();
+    map[0..6].* = .{ 1, 2, 3, 4, 5, 6 };
+
+    try std.testing.expectEqualSlices(u32, &.{
+        1, 2, 3, 4, 5, 6,
+    }, map);
+
+    try buf.fill(0);
+
+    try std.testing.expectEqualSlices(u32, &.{
+        0, 0, 0, 0, 0, 0,
+    }, map);
 }
 
 test "buffer grow" {

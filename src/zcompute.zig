@@ -799,6 +799,61 @@ pub fn Buffer(comptime T: type) type {
             }});
         }
 
+        /// Requires @sizeOf(T) to be a factor of 4
+        // TODO: allow filling a range?
+        pub fn fill(buf: Self, value: T) !void {
+            var value_u32: u32 = 0;
+            for (0..@divExact(@sizeOf(u32), @sizeOf(T))) |i| {
+                const x: @Type(.{ .Int = .{
+                    .signedness = .unsigned,
+                    .bits = @sizeOf(T) * 8,
+                } }) = @bitCast(value);
+                value_u32 |= @as(u32, x) << @intCast(i * @sizeOf(T) * 8);
+            }
+
+            // Allocate command buffer and fence
+            var cmd_buf: vk.CommandBuffer = undefined;
+            try buf.ctx.vkd.allocateCommandBuffers(buf.ctx.device, &.{
+                .command_pool = buf.ctx.cmd_pool,
+                .level = .primary,
+                .command_buffer_count = 1,
+            }, @as(*[1]vk.CommandBuffer, &cmd_buf));
+            defer buf.ctx.vkd.freeCommandBuffers(
+                buf.ctx.device,
+                buf.ctx.cmd_pool,
+                1,
+                @as(*[1]vk.CommandBuffer, &cmd_buf),
+            );
+
+            const fence = try buf.ctx.vkd.createFence(buf.ctx.device, &.{
+                .flags = .{},
+            }, null);
+            defer buf.ctx.vkd.destroyFence(buf.ctx.device, fence, null);
+
+            // Encode buffer fill command
+            try buf.ctx.vkd.beginCommandBuffer(cmd_buf, &.{
+                .flags = .{ .one_time_submit_bit = true },
+                .p_inheritance_info = null,
+            });
+            buf.ctx.vkd.cmdFillBuffer(cmd_buf, buf.buf, 0, vk.WHOLE_SIZE, value_u32);
+            try buf.ctx.vkd.endCommandBuffer(cmd_buf);
+
+            // Submit copy command
+            try buf.ctx.vkd.queueSubmit(buf.ctx.queue, 1, &[1]vk.SubmitInfo{.{
+                .command_buffer_count = 1,
+                .p_command_buffers = &[1]vk.CommandBuffer{cmd_buf},
+            }}, fence);
+
+            // Wait
+            while (try buf.ctx.vkd.waitForFences(
+                buf.ctx.device,
+                1,
+                &[1]vk.Fence{fence},
+                vk.TRUE,
+                std.math.maxInt(u64),
+            ) != .success) {}
+        }
+
         pub fn grow(buf: *Self, new_len: u64) !void {
             std.debug.assert(new_len > buf.len);
             const new_buf, const new_mem = try allocate(buf.ctx, new_len, buf.flags, false);
@@ -869,7 +924,7 @@ pub fn Buffer(comptime T: type) type {
                     .uniform_buffer_bit = flags.uniform,
                     .storage_buffer_bit = flags.storage,
                     .transfer_src_bit = flags.grow,
-                    .transfer_dst_bit = !first and flags.grow,
+                    .transfer_dst_bit = flags.fill or (!first and flags.grow),
                 },
                 .sharing_mode = .exclusive,
                 .queue_family_index_count = 1,
@@ -896,6 +951,7 @@ pub const BufferInitFlags = packed struct {
     map: bool = false,
 
     grow: bool = false,
+    fill: bool = false,
 
     uniform: bool = false,
     storage: bool = false,
@@ -934,6 +990,7 @@ const need_api: vk.ApiInfo = .{
         .cmdBindPipeline = true,
         .cmdCopyBuffer = true,
         .cmdDispatchBase = true,
+        .cmdFillBuffer = true,
         .cmdPushConstants = true,
         .createBuffer = true,
         .createCommandPool = true,
