@@ -776,7 +776,7 @@ pub fn Buffer(comptime T: type) type {
             );
             buf.mapped_off = off;
             const ptr_typed: [*]align(min_map_align) T = @alignCast(@ptrCast(ptr));
-            return ptr_typed[0..buf.len];
+            return ptr_typed[0..len];
         }
         pub fn unmap(buf: Self) void {
             buf.ctx.vkd.unmapMemory(buf.ctx.device, buf.mem);
