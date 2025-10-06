@@ -46,7 +46,7 @@ pub const Context = struct {
 
         try loader.ref();
         errdefer loader.deref();
-        ctx.vkb = try BaseDispatch.load(loader.getProcAddress);
+        ctx.vkb = BaseDispatch.load(loader.getProcAddress);
 
         try ctx.initInstance(allocator);
         errdefer ctx.vki.destroyInstance(ctx.instance, null);
@@ -77,14 +77,14 @@ pub const Context = struct {
                 .application_version = app_version,
                 .p_engine_name = "zcompute",
                 .engine_version = 0 << 20 | 1 << 10 | 0,
-                .api_version = vk.makeApiVersion(0, 1, 1, 0),
+                .api_version = @bitCast(vk.makeApiVersion(0, 1, 1, 0)),
             },
             .enabled_layer_count = @intCast(layers.len),
             .pp_enabled_layer_names = layers.ptr,
             .enabled_extension_count = 0,
             .pp_enabled_extension_names = undefined,
         }, null);
-        ctx.vki = try InstanceDispatch.load(ctx.instance, ctx.vkb.dispatch.vkGetInstanceProcAddr);
+        ctx.vki = InstanceDispatch.load(ctx.instance, ctx.vkb.dispatch.vkGetInstanceProcAddr.?);
     }
 
     fn instanceLayers(ctx: Context, allocator: std.mem.Allocator) ![][*:0]const u8 {
@@ -137,8 +137,8 @@ pub const Context = struct {
             // Check device features
             const features = ctx.vki.getPhysicalDeviceFeatures(dev);
             const ok = inline for (comptime std.meta.fieldNames(VkDeviceFeatures)) |field| {
-                const want = @field(opts.vulkan_device_features, field) != 0;
-                const have = @field(features, field) != 0;
+                const want = @field(opts.vulkan_device_features, field) != .false;
+                const have = @field(features, field) != .false;
                 if (want and !have) {
                     break false;
                 }
@@ -205,7 +205,7 @@ pub const Context = struct {
             .pp_enabled_extension_names = opts.vulkan_device_extensions.ptr,
             .p_enabled_features = &opts.vulkan_device_features,
         }, null);
-        ctx.vkd = try DeviceDispatch.load(ctx.device, ctx.vki.dispatch.vkGetDeviceProcAddr);
+        ctx.vkd = DeviceDispatch.load(ctx.device, ctx.vki.dispatch.vkGetDeviceProcAddr.?);
         errdefer ctx.vkd.destroyDevice(ctx.device, null);
 
         ctx.queue = ctx.vkd.getDeviceQueue(ctx.device, ctx.queue_family, 0);
@@ -437,7 +437,7 @@ pub fn Shader(comptime parameter_decls: []const ShaderParameter) type {
                 shad.ctx.device,
                 1,
                 &[1]vk.Fence{shad.fence},
-                vk.TRUE,
+                .true,
                 timeout,
             );
             return res == .success;
@@ -618,17 +618,17 @@ const ShaderParamInfo = struct {
             fields[i] = .{
                 .name = param.name,
                 .type = param.data_type,
-                .default_value = null,
+                .default_value_ptr = null,
                 .is_comptime = false,
                 .alignment = @alignOf(param.data_type),
             };
 
             if (param.kind == .push_constant) {
                 switch (@typeInfo(param.data_type)) {
-                    .Struct => |info| if (info.layout == .auto) {
+                    .@"struct" => |info| if (info.layout == .auto) {
                         @compileError("Push constant data should have defined layout. Use an extern struct (or a packed struct if you know what you're doing)");
                     },
-                    .Union => |info| if (info.layout == .auto) {
+                    .@"union" => |info| if (info.layout == .auto) {
                         @compileError("Push constant data should have defined layout. Unions are a bad idea anyway, but if you must, use an extern or packed union");
                     },
                     // TODO: there's a lot more checking we could do here but I'm lazy
@@ -717,7 +717,7 @@ const ShaderParamInfo = struct {
                 pool_sizes[0..pool_i],
             ),
 
-            .params_type = @Type(.{ .Struct = .{
+            .params_type = @Type(.{ .@"struct" = .{
                 .layout = .auto,
                 .fields = &fields,
                 .decls = &.{},
@@ -775,7 +775,7 @@ pub fn Buffer(comptime T: type) type {
                 .{},
             );
             buf.mapped_off = off;
-            const ptr_typed: [*]align(min_map_align) T = @alignCast(@ptrCast(ptr));
+            const ptr_typed: [*]align(min_map_align) T = @ptrCast(@alignCast(ptr));
             return ptr_typed[0..len];
         }
         pub fn unmap(buf: Self) void {
@@ -804,7 +804,7 @@ pub fn Buffer(comptime T: type) type {
         pub fn fill(buf: Self, value: T) !void {
             var value_u32: u32 = 0;
             for (0..@divExact(@sizeOf(u32), @sizeOf(T))) |i| {
-                const x: @Type(.{ .Int = .{
+                const x: @Type(.{ .int = .{
                     .signedness = .unsigned,
                     .bits = @sizeOf(T) * 8,
                 } }) = @bitCast(value);
@@ -849,7 +849,7 @@ pub fn Buffer(comptime T: type) type {
                 buf.ctx.device,
                 1,
                 &[1]vk.Fence{fence},
-                vk.TRUE,
+                .true,
                 std.math.maxInt(u64),
             ) != .success) {}
         }
@@ -904,7 +904,7 @@ pub fn Buffer(comptime T: type) type {
                 buf.ctx.device,
                 1,
                 &[1]vk.Fence{fence},
-                vk.TRUE,
+                .true,
                 std.math.maxInt(u64),
             ) != .success) {}
 
@@ -957,7 +957,7 @@ pub const BufferInitFlags = packed struct {
     storage: bool = false,
 };
 fn isBufferWrapper(comptime T: type) bool {
-    return @typeInfo(T) == .Struct and
+    return @typeInfo(T) == .@"struct" and
         @hasField(T, "buf") and
         std.meta.fieldInfo(T, .buf).type == vk.Buffer and
         @hasDecl(T, "is_zcompute_buffer_wrapper");
@@ -1027,9 +1027,9 @@ const need_api: vk.ApiInfo = .{
     },
 };
 
-const BaseDispatch = vk.BaseWrapper(&.{need_api});
-const InstanceDispatch = vk.InstanceWrapper(&.{need_api});
-const DeviceDispatch = vk.DeviceWrapper(&.{need_api});
+const BaseDispatch = vk.BaseWrapper;
+const InstanceDispatch = vk.InstanceWrapper;
+const DeviceDispatch = vk.DeviceWrapper;
 
 // Simple loader for base Vulkan functions
 threadlocal var loader: Loader = .{};
